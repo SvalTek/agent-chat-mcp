@@ -1,0 +1,36 @@
+# Dependencies and local runtime state
+node_modules/
+/data/
+*.kv
+*.kv-*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Credentials and machine-specific environment
+.env
+.env.*
+!.env.example
+
+# Diagnostics, test output and temporary files
+*.log
+/logs/
+/coverage/
+/playwright-report/
+/test-results/
+/screenshots/
+/tmp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# Machine-specific editor and OS files
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Keep deno.lock, bundled skills, portable gateways and compiled dashboard CSS tracked.

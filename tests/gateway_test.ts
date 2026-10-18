@@ -1,0 +1,217 @@
+import { assert, assertEquals, assertRejects } from "@std/assert";
+import { MCPClient } from "@mcp-use/client";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { BoardStore } from "../src/domain/board.ts";
+import { AuthService } from "../src/auth/service.ts";
+import { createApp } from "../src/app.ts";
+import type { createHttpGateway as GatewayFactory } from "../src/gateway/http.ts";
+
+function value(result: { content?: unknown }) {
+  const content = result.content as { type: string; text?: string }[];
+  return JSON.parse(content.find((c) => c.type === "text")!.text!);
+}
+const password = "correct horse battery staple";
+Deno.test({
+  name:
+    "HTTP gateway: modern upstream, isolated identities, cursor resources, notifications and reauthentication",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const dir = await Deno.makeTempDir({ prefix: "agent-chat-integration-" });
+    const store = await BoardStore.open(join(dir, "board.kv"));
+    const auth = new AuthService(store, {
+      secret: "integration-secret-at-least-32-characters",
+    });
+    let backend = createApp({ store, auth });
+    const http = Deno.serve(
+      { hostname: "127.0.0.1", port: 0, onListen() {} },
+      (request) => backend.app.fetch(request),
+    );
+    const url = "http://127.0.0.1:" + http.addr.port;
+    const copiedHttp = join(dir, "http.ts");
+    await Deno.copyFile(new URL("../http.ts", import.meta.url), copiedHttp);
+    const { createHttpGateway } = await import(
+      pathToFileURL(copiedHttp).href
+    ) as { createHttpGateway: typeof GatewayFactory };
+    const gateway = createHttpGateway({ url });
+    const gatewayHttp = Deno.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      onListen() {},
+    }, gateway.app.fetch);
+    const makeClient = (legacy = true) =>
+      MCPClient.fromDict({
+        mcpServers: {
+          board: {
+            url: "http://127.0.0.1:" + gatewayHttp.addr.port + "/mcp",
+            oauth: false,
+            ...(legacy ? { protocolNegotiation: "legacy" as const } : {}),
+          },
+        },
+      });
+    const a = makeClient(), b = makeClient(false);
+    try {
+      const alice = await a.connect("board"), bob = await b.connect("board");
+      assert((await alice.listTools()).some((t) => t.name === "auth"));
+      assert(
+        (await alice.readResource("agent-chat://skill")).contents.some((c) =>
+          "text" in c && c.text.includes("durable private memory")
+        ),
+      );
+      const status = await alice.callTool("auth", {
+        username: "alice",
+        password,
+      });
+      assert(!JSON.stringify(status).includes("accessToken"));
+      assert(value(status).authenticated);
+      const category = value(
+        await alice.callTool("category_create", { name: "Coordination" }),
+      );
+      assert(
+        (await bob.callTool("category_create", { name: "Forbidden" })).isError,
+      );
+      await bob.callTool("auth", { username: "bob", password });
+      const category2 = value(
+        await bob.callTool("category_create", { name: "Second" }),
+      );
+      assert(category.id !== category2.id);
+      const page = await alice.readResource("agent-chat://categories?limit=1");
+      const parsed = JSON.parse((page.contents[0] as { text: string }).text);
+      assertEquals(parsed.items.length, 1);
+      assert(parsed.nextCursor);
+      const next = await alice.readResource(
+        "agent-chat://categories?limit=1&cursor=" +
+          encodeURIComponent(parsed.nextCursor),
+      );
+      assertEquals(
+        JSON.parse((next.contents[0] as { text: string }).text).items.length,
+        1,
+      );
+
+      const updates: string[] = [];
+      bob.on("notification", (event) => {
+        if (event.method === "notifications/resources/updated") {
+          updates.push(String(event.params?.uri));
+        }
+      });
+      await bob.subscribeToResource("agent-chat://inbox/me");
+      const dm = value(
+        await alice.callTool("dm_send", {
+          recipient: "bob",
+          text: "Private hello",
+        }),
+      );
+      await until(() => updates.includes("agent-chat://inbox/me"));
+      assert(
+        JSON.stringify(
+          await bob.readResource("agent-chat://dms/" + dm.threadId),
+        ).includes("Private hello"),
+      );
+      const inbox = JSON.parse(
+        (await bob.readResource("agent-chat://inbox/me")).contents.map((c) =>
+          "text" in c ? c.text : ""
+        ).join(""),
+      );
+      assertEquals(inbox.items.length, 1);
+      updates.length = 0;
+      await backend.close();
+      backend = createApp({ store, auth });
+      // Reconnection re-establishes subscriptions and prompts a durable reread.
+      await until(() => updates.includes("agent-chat://inbox/me"));
+      assert(
+        JSON.stringify(await bob.readResource("agent-chat://inbox/me"))
+          .includes("Private hello"),
+      );
+      updates.length = 0;
+      await alice.callTool("dm_send", {
+        recipient: "bob",
+        text: "After reconnect",
+      });
+      await until(() => updates.includes("agent-chat://inbox/me"));
+      const failed = await bob.callTool("auth", {
+        username: "alice",
+        password: "wrong password",
+      });
+      assert(failed.isError);
+      assert(
+        JSON.stringify(await bob.readResource("agent-chat://inbox/me"))
+          .includes("Private hello"),
+      );
+      await bob.callTool("auth", { username: "charlie", password });
+      await assertRejects(() =>
+        bob.readResource("agent-chat://dms/" + dm.threadId)
+      );
+      updates.length = 0;
+      await alice.callTool("dm_send", { recipient: "bob", text: "Only Bob" });
+      await new Promise((r) => setTimeout(r, 100));
+      assertEquals(updates.length, 0);
+      const anonymous = await auth.openSession();
+      const p = await auth.verifyAgent(anonymous.accessToken);
+      const refreshed = await auth.refresh(p);
+      assertEquals(
+        (await auth.verifyAgent(refreshed.accessToken)).sessionId,
+        p.sessionId,
+      );
+      const changed = await auth.authenticate(p, "david", password);
+      const modern = MCPClient.fromDict({
+        mcpServers: {
+          direct: {
+            url: url + "/mcp",
+            authToken: changed.accessToken,
+            oauth: false,
+            protocolNegotiation: { pin: "2026-07-28" },
+          },
+        },
+      });
+      try {
+        const connection = await modern.connect("direct");
+        assertEquals(connection.info.protocolVersion, "2026-07-28");
+        assert(
+          JSON.stringify(
+            await connection.readResource("agent-chat://categories"),
+          ).includes("Coordination"),
+        );
+      } finally {
+        await modern.close();
+      }
+      await assertRejects(() => auth.verifyAgent(anonymous.accessToken));
+      await assertRejects(() =>
+        auth.verifyPurpose(changed.accessToken, "unrelated-service")
+      );
+      const foreign = await auth.issue("unrelated-service", "external", {
+        kind: "external",
+      });
+      await assertRejects(() => auth.verifyAgent(foreign));
+      const expired = await auth.issue("agent-chat-mcp", p.sessionId, {
+        sid: p.sessionId,
+        rev: p.revision,
+      }, -10);
+      await assertRejects(() => auth.verifyAgent(expired));
+      const alien = new AuthService(store, {
+        secret: "different-integration-secret-at-least-32-characters",
+      });
+      await assertRejects(() =>
+        alien.verifyPurpose(changed.accessToken, "agent-chat-mcp")
+      );
+    } finally {
+      await a.close();
+      await b.close();
+      await gateway.close();
+      await gatewayHttp.shutdown();
+      await backend.close();
+      await http.shutdown();
+      store.close();
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+async function until(predicate: () => boolean) {
+  const end = Date.now() + 5000;
+  while (!predicate()) {
+    if (Date.now() > end) {
+      throw new Error("Timed out waiting for resource update.");
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}

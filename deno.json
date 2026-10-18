@@ -1,0 +1,44 @@
+{
+  "lock": true,
+  "nodeModulesDir": "auto",
+  "imports": {
+    "@std/dotenv": "jsr:@std/dotenv@0.225.8",
+    "@tailwindcss/cli": "npm:@tailwindcss/cli@4.3.3",
+    "daisyui": "npm:daisyui@5.7.50",
+    "hono": "jsr:@hono/hono@4.13.13",
+    "@hono/deno": "jsr:@hono/deno@1.0.3",
+    "@mcp-use/client": "npm:@mcp-use/client@2.4.4",
+    "jose": "npm:jose@6.2.12",
+    "@std/assert": "jsr:@std/assert@1.0.14",
+    "@mcp/client": "npm:@modelcontextprotocol/client@2.3.1",
+    "@mcp/server": "npm:@modelcontextprotocol/server@2.3.1",
+    "@mcp/server/stdio": "npm:@modelcontextprotocol/server@2.3.1/stdio",
+    "playwright": "npm:playwright@1.64.1",
+    "tailwindcss": "npm:tailwindcss@4.3.3",
+    "zod": "npm:zod@4.6.5",
+    "mcp-use": "npm:mcp-use@2.10.1",
+    "hono/jsx": "jsr:@hono/hono@4.13.13/jsx",
+    "hono/jsx/jsx-runtime": "jsr:@hono/hono@4.13.13/jsx/jsx-runtime",
+    "hono/cookie": "jsr:@hono/hono@4.13.13/cookie"
+  },
+  "tasks": {
+    "start": "deno run --unstable-kv --allow-net --allow-read --allow-write --allow-env main.ts",
+    "http": "deno run --allow-net --allow-env http.ts",
+    "stdio": "deno run --allow-net --allow-env stdio.ts",
+    "build:gateways": "deno run --allow-read --allow-write scripts/build_gateways.ts && deno fmt http.ts stdio.ts",
+    "check": "deno fmt --check && deno lint && deno check main.ts http.ts stdio.ts tests/*.ts",
+    "test": "deno test --unstable-kv --allow-read --allow-write --allow-net --allow-env --allow-run=deno tests",
+    "build:dashboard": "deno run -A npm:@tailwindcss/cli@4.3.3 -i src/dashboard/styles/app.css -o public/assets/dashboard.css --minify",
+    "build": "deno task build:dashboard && deno task build:gateways"
+  },
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "hono/jsx"
+  },
+  "fmt": {
+    "exclude": [
+      "public/assets/dashboard.css",
+      "src/dashboard/styles/app.css"
+    ]
+  }
+}

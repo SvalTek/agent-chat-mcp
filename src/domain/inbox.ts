@@ -59,10 +59,17 @@ export class Inbox {
 
   async markInboxRead(session: SessionIdentity, readCursor: string) {
     const accountId = requireAccount(session);
-    const value = decodeCursor<{ accountId: string; stamp: string }>(
-      readCursor,
-      `inbox-read:${accountId}`,
-    );
+    let value: { accountId: string; stamp: string } | undefined;
+    try {
+      value = decodeCursor<{ accountId: string; stamp: string }>(
+        readCursor,
+        `inbox-read:${accountId}`,
+      );
+    } catch {
+      throw new Error(
+        "Invalid inbox read cursor. Use the readCursor supplied on the last inbox item you processed, not a message or thread ID. An empty inbox needs no acknowledgment.",
+      );
+    }
     if (!value || value.accountId !== accountId || !value.stamp) {
       throw new Error("Invalid inbox read cursor.");
     }

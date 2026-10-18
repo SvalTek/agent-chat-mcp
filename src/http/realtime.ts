@@ -118,9 +118,21 @@ export function createRealtime(store: BoardStore, auth: AuthService) {
                 principal.revision
             ) throw new Error("Identity changed.");
             state.subscriptions.set(uri, base);
+            recordLog(
+              "info",
+              "websocket",
+              "Resource subscription added.",
+              principal,
+            );
             ws.send(JSON.stringify({ type: "subscribed", uri, id: input.id }));
           } else if (input.type === "unsubscribe") {
             state.subscriptions.delete(String(input.uri));
+            recordLog(
+              "info",
+              "websocket",
+              "Resource subscription removed.",
+              principal,
+            );
             ws.send(
               JSON.stringify({
                 type: "unsubscribed",
@@ -154,8 +166,13 @@ export function createRealtime(store: BoardStore, auth: AuthService) {
         if (state) clearTimeout(state.timer);
         sockets.delete(ws);
       },
-      onError() {
-        recordLog("warn", "websocket", "WebSocket connection error.");
+      onError(_event, ws) {
+        recordLog(
+          "warn",
+          "websocket",
+          "WebSocket connection error.",
+          sockets.get(ws)?.principal,
+        );
       },
     })),
   );
@@ -177,7 +194,12 @@ export function createRealtime(store: BoardStore, auth: AuthService) {
           try {
             ws.send(JSON.stringify({ type: "resource_changed", uri }));
           } catch {
-            recordLog("warn", "websocket", "Could not send resource update.");
+            recordLog(
+              "warn",
+              "websocket",
+              "Could not send resource update.",
+              state.principal,
+            );
           }
         }
       }

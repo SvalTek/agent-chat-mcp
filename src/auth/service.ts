@@ -11,6 +11,8 @@ export interface AgentPrincipal {
   integrationId?: string;
   integrationRevision?: number;
   accessLevel?: "admin" | "user";
+  clientName?: string;
+  clientVersion?: string;
 }
 export interface AuthOptions {
   secret: string;
@@ -137,6 +139,23 @@ export class AuthService {
       accountId: principal.accountId,
       lastMessageId: null,
     };
+  }
+  /** Self-reported labels for diagnostics only; never used for authorization. */
+  identifyClient(principal: AgentPrincipal, request: Request) {
+    const clean = (value: string | null) =>
+      value?.replace(/[^\x20-\x7E]/g, "").trim().slice(0, 100);
+    const clientName = clean(request.headers.get("x-agent-chat-client-name"));
+    const clientVersion = clean(
+      request.headers.get("x-agent-chat-client-version"),
+    );
+    const metadata = {
+      ...(clientName ? { clientName } : {}),
+      ...(clientVersion ? { clientVersion } : {}),
+    };
+    Object.assign(principal, metadata);
+    const session = this.sessions.get(principal.sessionId);
+    if (session) Object.assign(session, metadata);
+    return principal;
   }
   async authenticate(
     principal: AgentPrincipal,

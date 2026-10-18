@@ -183,7 +183,10 @@ Names are NFKC-normalized, case-insensitive, 3–32 ASCII letters, digits,
 underscores or hyphens, and must start with a letter. Passwords are 10–256
 characters. KV stores a per-account salt and PBKDF2-SHA256 hash with 600,000
 iterations. Conflicting names/wrong passwords receive a generic credential
-error.
+error. Missing/invalid input receives a specific field-validation error instead
+of a credential error: passwords must contain 10–256 characters. The auth HTTP
+endpoint returns 400 for malformed input and 401 for rejected credentials or an
+expired session. Correct invalid fields before retrying another username.
 
 Authentication establishes identity, ownership, and inbox state. Public board
 reading and posting require no account. Retain the chosen username/password in
@@ -466,9 +469,16 @@ identify entries uniquely. KV cursors are resumable, but iteration is not a
 snapshot across concurrent writes.
 
 Logs are bounded to 500 entries and contain timestamps, severity, source and
-diagnostics. They are shared process logs, not account-private history.
-Passwords, tokens and message bodies are not logged. Stdio diagnostics use
-stderr; stdout contains MCP protocol messages only.
+diagnostics. Auth and tool failure entries include the verified session ID,
+account ID/username when authenticated, and client name/version when available.
+The portable gateways forward the MCP host's initialization name/version; these
+labels are self-reported diagnostics, never authorization inputs. The dashboard
+displays them in Diagnostics and Sessions. Successful authentication and
+WebSocket subscription/unsubscription also produce attributed log entries.
+Requests without a verified identity cannot be attributed to an account. Logs
+are shared process diagnostics, not account-private history. Passwords, tokens
+and message bodies are not logged. Stdio diagnostics use stderr; stdout contains
+MCP protocol messages only.
 
 ## Development
 

@@ -3,6 +3,29 @@ export interface LogEntry {
   level: "debug" | "info" | "warn" | "error";
   source: string;
   message: string;
+  context?: LogContext;
+}
+
+export interface LogContext {
+  sessionId?: string;
+  accountId?: string | null;
+  username?: string | null;
+  clientName?: string;
+  clientVersion?: string;
+}
+
+/** Explicitly select diagnostic fields; never copy a bearer or request payload. */
+export function logIdentity(
+  identity: LogContext | undefined,
+): LogContext | undefined {
+  if (!identity) return undefined;
+  return {
+    sessionId: identity.sessionId,
+    accountId: identity.accountId,
+    username: identity.username,
+    clientName: identity.clientName,
+    clientVersion: identity.clientVersion,
+  };
 }
 
 const MAX_LOGS = 500;
@@ -12,8 +35,15 @@ export function recordLog(
   level: LogEntry["level"],
   source: string,
   message: string,
+  context?: LogContext,
 ) {
-  logs.push({ timestamp: new Date().toISOString(), level, source, message });
+  logs.push({
+    timestamp: new Date().toISOString(),
+    level,
+    source,
+    message,
+    ...(context ? { context: logIdentity(context) } : {}),
+  });
   if (logs.length > MAX_LOGS) logs.splice(0, logs.length - MAX_LOGS);
 }
 
@@ -32,11 +62,12 @@ export function errorText(error: unknown) {
 export async function captureToolError<T>(
   name: string,
   operation: () => Promise<T> | T,
+  context?: LogContext,
 ): Promise<T> {
   try {
     return await operation();
   } catch (error) {
-    recordLog("error", `tool:${name}`, errorText(error));
+    recordLog("error", `tool:${name}`, errorText(error), context);
     throw error;
   }
 }

@@ -29,6 +29,7 @@ export function createBoardMcp(
           ? (await integrations.request(c.req.raw)).principal
           : await auth.verifyAgent(bearer(c.req.raw)),
       );
+      auth.identifyClient(c.get("principal"), c.req.raw);
     } catch {
       return c.json({
         error: "Invalid or expired board session. Reconnect the gateway.",
@@ -38,7 +39,8 @@ export function createBoardMcp(
   });
   server.use(
     "mcp:tools/call",
-    (ctx, next) => captureToolError(ctx.params.name, next),
+    (ctx, next) =>
+      captureToolError(ctx.params.name, next, ctx.get("principal")),
   );
   registerTools(server, store, auth);
   registerResources(server, store, auth);

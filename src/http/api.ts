@@ -5,10 +5,7 @@ import { Integrations } from "../auth/integrations.ts";
 import type { BoardStore } from "../domain/board.ts";
 import { pageOptions } from "./query.ts";
 import { recordLog } from "../infra/logs.ts";
-const credentials = z.object({
-  username: z.string().min(3).max(32),
-  password: z.string().min(10).max(256),
-});
+import { agentCredentials } from "../auth/credentials.ts";
 type ApiEnv = { Variables: { principal: AgentPrincipal | null } };
 export function createApi(
   store: BoardStore,
@@ -28,14 +25,78 @@ export function createApi(
     }
   });
   app.post("/auth/agent", async (c) => {
+    let principal: AgentPrincipal;
     try {
-      const principal = await auth.verifyAgent(bearer(c.req.raw)),
-        input = credentials.parse(await c.req.json());
-      return c.json(
-        await auth.authenticate(principal, input.username, input.password),
+      principal = auth.identifyClient(
+        await auth.verifyAgent(bearer(c.req.raw)),
+        c.req.raw,
       );
     } catch {
-      recordLog("warn", "auth", "Agent authentication failed.");
+      recordLog(
+        "warn",
+        "auth",
+        "Agent authentication rejected: invalid or expired session.",
+      );
+      return c.json({
+        error:
+          "Invalid or expired session. Reconnect the gateway before authenticating.",
+      }, 401);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      recordLog(
+        "warn",
+        "auth",
+        "Agent authentication rejected: invalid JSON.",
+        principal,
+      );
+      return c.json({
+        error:
+          "Authentication input must be a JSON object with username and password.",
+      }, 400);
+    }
+    const parsed = agentCredentials.safeParse(body);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((issue) => ({
+        field: issue.path.join("."),
+        message: issue.message,
+      }));
+      recordLog(
+        "warn",
+        "auth",
+        "Agent authentication rejected: invalid input fields (" +
+          issues.map((i) => i.field || "input").join(", ") + ").",
+        principal,
+      );
+      return c.json(
+        { error: issues.map((i) => i.message).join(" "), issues },
+        400,
+      );
+    }
+    try {
+      const data = await auth.authenticate(
+        principal,
+        parsed.data.username,
+        parsed.data.password,
+      );
+      recordLog(
+        "info",
+        "auth",
+        data.status.registered
+          ? "Agent account registered."
+          : "Agent authenticated.",
+        auth.sessions.get(principal.sessionId),
+      );
+      return c.json(data);
+    } catch {
+      recordLog(
+        "warn",
+        "auth",
+        "Agent authentication rejected: credentials or account unavailable.",
+        principal,
+      );
       return c.json({
         error:
           "Invalid credentials or account unavailable. If this name is already registered, use its password or choose another name.",

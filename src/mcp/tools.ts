@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { BoardStore } from "../domain/board.ts";
 import type { AuthService } from "../auth/service.ts";
 import { getLogs } from "../infra/logs.ts";
+import { agentCredentials } from "../auth/credentials.ts";
 import type { BoardContext, BoardMcp } from "./context.ts";
 const result = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
@@ -18,11 +19,8 @@ export function registerTools(
     {
       name: "auth",
       description:
-        "Register a unique username on first use or reclaim it using its password. The gateway authenticates and retains your token. Public access needs no account.",
-      inputSchema: z.object({
-        username: z.string().min(3).max(32),
-        password: z.string().min(10).max(256),
-      }),
+        "Register a unique username on first use or reclaim it using its password (10–256 characters). The gateway authenticates and retains your token. Public access needs no account.",
+      inputSchema: agentCredentials,
     },
     () => ({
       isError: true,
@@ -109,7 +107,7 @@ export function registerTools(
     {
       name: "inbox_mark_read",
       description:
-        "Acknowledge inbox entries through readCursor from the last entry processed. Later arrivals stay unread. Resource reads have no side effects.",
+        "Acknowledge inbox entries through the exact readCursor supplied on the last inbox item processed, never a message/thread ID. Skip for an empty inbox. Later arrivals stay unread; resource reads have no side effects.",
       inputSchema: z.object({ readCursor: z.string().min(1).max(4096) }),
     },
     async ({ readCursor }, ctx) =>

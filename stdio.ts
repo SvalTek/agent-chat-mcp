@@ -34,6 +34,7 @@ export class Gateway {
   private expiresAt = 0;
   private client?: MCPClient;
   private connection?: MCPConnection;
+  private connectedClientInfo = "";
   private socket?: WebSocket;
   private socketReady?: Promise<void>;
   private retry?: ReturnType<typeof setTimeout>;
@@ -209,6 +210,7 @@ export class Gateway {
     const response = await fetch(new URL(path, this.base), {
       method,
       headers: {
+        ...this.clientHeaders(),
         authorization: "Bearer " + this.token,
         "content-type": "application/json",
       },
@@ -221,23 +223,37 @@ export class Gateway {
     }
     return data;
   }
+  private clientHeaders(): Record<string, string> {
+    const info = this.server.getClientVersion();
+    const clean = (value: string) =>
+      value.replace(/[^\x20-\x7E]/g, "").slice(0, 100);
+    return info
+      ? {
+        "x-agent-chat-client-name": clean(info.name),
+        "x-agent-chat-client-version": clean(info.version),
+      }
+      : {};
+  }
   private async connectMcp() {
     const old = this.client;
     this.connection = undefined;
     this.client = undefined;
     if (old) await old.close();
+    const headers = this.clientHeaders();
     const client = MCPClient.fromDict({
       mcpServers: {
         board: {
           url: new URL("/mcp", this.base).href,
           oauth: false,
           authToken: this.token,
+          headers,
         },
       },
     });
     try {
       this.connection = await client.connect("board");
       this.client = client;
+      this.connectedClientInfo = JSON.stringify(headers);
     } catch (error) {
       await client.close();
       throw error;
@@ -252,7 +268,10 @@ export class Gateway {
         await this.connectMcp();
         if (this.subscriptions.size) await this.ensureSocket();
       }
-      if (!this.connection) await this.connectMcp();
+      if (
+        !this.connection ||
+        this.connectedClientInfo !== JSON.stringify(this.clientHeaders())
+      ) await this.connectMcp();
       return await operation();
     });
     this.queue = result.catch(() => {});

@@ -40,7 +40,29 @@ export function LogsPage(
                     {item.level}
                   </Badge>
                   <span class="text-base-content/50">{item.source}</span>
-                  <pre class="whitespace-pre-wrap break-all font-mono text-base-content/70">{item.message}</pre>
+                  <div class="min-w-0">
+                    <pre class="whitespace-pre-wrap break-all font-mono text-base-content/70">{item.message}</pre>
+                    {item.context
+                      ? (
+                        <p class="mt-1 break-all text-base-content/50">
+                          {item.context.clientName ?? "Unknown client"}
+                          {item.context.clientVersion
+                            ? " " + item.context.clientVersion
+                            : ""}
+                          {" · "}
+                          {item.context.username
+                            ? "@" + item.context.username
+                            : "Anonymous"}
+                          {item.context.sessionId
+                            ? " · session " + item.context.sessionId
+                            : ""}
+                          {item.context.accountId
+                            ? " · account " + item.context.accountId
+                            : ""}
+                        </p>
+                      )
+                      : null}
+                  </div>
                 </div>
               ))}
             </div>

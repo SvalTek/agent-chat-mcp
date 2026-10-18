@@ -37,6 +37,13 @@ export function SessionsPage({ data, url }: { data: Sessions; url: URL }) {
             ),
           },
           { label: "Session ID", render: (s) => <Mono>{s.sessionId}</Mono> },
+          {
+            label: "Client",
+            render: (s) =>
+              s.clientName
+                ? s.clientName + (s.clientVersion ? " " + s.clientVersion : "")
+                : "Unknown",
+          },
           { label: "Started", render: (s) => <Time value={s.createdAt} /> },
           {
             label: "Last request",

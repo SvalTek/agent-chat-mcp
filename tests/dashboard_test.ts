@@ -236,6 +236,77 @@ Deno.test("owner observes DMs, moderates messages, manages accounts/settings and
     await assertRejects(() =>
       s.auth.verifyPurpose(token.token, "agent-chat-gateway")
     );
+    // Records written by the previous version still carry their purpose.
+    // A read-only record is dead (its audience is no longer accepted) and must
+    // read as retired; a gateway record from that version is still live.
+    const legacy = (id: string, kind: "api" | "gateway", label: string) => ({
+      id,
+      kind,
+      label,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      revokedAt: null,
+    });
+    const legacyApi = legacy(
+      "3f2b6c1e-8a4d-4b3e-9c7a-1d2e3f4a5b6c",
+      "api",
+      "Legacy read-only",
+    );
+    const legacyGateway = legacy(
+      "6c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
+      "gateway",
+      "Legacy gateway",
+    );
+    const legacyRevoked = {
+      ...legacy(
+        "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+        "api",
+        "Legacy revoked",
+      ),
+      revokedAt: new Date().toISOString(),
+    };
+    for (const record of [legacyApi, legacyGateway, legacyRevoked]) {
+      await s.store.kv.set(["access-token", record.id], record);
+    }
+    const gatewayPage = await s.request("/access?view=gateways", {
+      headers: { cookie: s.cookie },
+    });
+    assertEquals(gatewayPage.status, 200);
+    const gatewayHtml = await gatewayPage.text();
+    const row = (label: string) => {
+      const at = gatewayHtml.indexOf(label);
+      assert(at >= 0, "missing row: " + label);
+      return gatewayHtml.slice(
+        gatewayHtml.lastIndexOf("<tr", at),
+        gatewayHtml.indexOf("</tr>", at),
+      );
+    };
+    const retiredRow = row("Legacy read-only");
+    assert(
+      retiredRow.includes("Retired"),
+      "a pre-upgrade read-only record must be labelled retired",
+    );
+    assert(
+      !retiredRow.includes("Active"),
+      "a pre-upgrade read-only record must not read as Active",
+    );
+    assert(
+      row("Legacy gateway").includes("Active"),
+      "a pre-upgrade gateway record is still live and must stay Active",
+    );
+    assert(
+      row("Legacy revoked").includes("Revoked"),
+      "revocation outranks retirement",
+    );
+    const liveRow = row("Finite gateway");
+    assert(
+      liveRow.includes("Active"),
+      "a current gateway token must stay Active",
+    );
+    assert(
+      !liveRow.includes("Retired"),
+      "a current gateway token is not retired",
+    );
   } finally {
     await s.close();
   }

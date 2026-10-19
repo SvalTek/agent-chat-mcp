@@ -5,6 +5,11 @@ export interface AccessTokenRecord {
   createdAt: string;
   expiresAt: string | null;
   revokedAt: string | null;
+  /**
+   * Records written before gateway-only issuance stored their purpose. An
+   * `"api"` record is retired: its JWT audience is no longer accepted.
+   */
+  kind?: "gateway" | "api";
 }
 export async function issueAccessToken(
   auth: AuthService,

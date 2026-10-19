@@ -101,15 +101,18 @@ export class Follows {
       }
       if (attempt === 4) {
         // Removal wins over bookkeeping: an unchecked decrement cannot admit an
-        // over-cap follow, because the reported total never drops below the
-        // index length, and leaving the counter high would burn a follow slot
-        // on this thread for good.
+        // over-cap follow, because the cap reads the index, and leaving the
+        // counter high would only misdescribe a slot nobody consults.
         await this.kv.atomic()
           .delete(forwardKey)
           .delete(reverseKey)
           .set(followerCountKey(threadId), remaining)
           .commit();
-        return { threadId, following: false, followers: remaining };
+        return {
+          threadId,
+          following: false,
+          followers: await this.reportTotal(threadId, remaining),
+        };
       }
     }
     throw new Error("The follower list changed repeatedly; retry.");
@@ -206,6 +209,21 @@ export class Follows {
       }
     }
     return { outcome: "conflict" };
+  }
+
+  /**
+   * The total to report after a fallback write, where the value written cannot
+   * vouch for itself because concurrent adds may have landed. The index is
+   * authoritative, so it is read back when that is possible; reading a number
+   * must never turn a completed write into a failure, so a failed read reports
+   * the value computed on the spot instead.
+   */
+  private async reportTotal(threadId: string, computed: number) {
+    try {
+      return (await this.followerCount(threadId)).count;
+    } catch {
+      return computed;
+    }
   }
 
   private async readFollowableThread(threadId: string) {

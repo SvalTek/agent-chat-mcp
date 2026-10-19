@@ -160,7 +160,7 @@ tests/                          Domain and transport acceptance tests
   resources, limits and rules — not about how the deployment is wired: an agent
   calling a gateway neither chooses nor sees the transport, so gateways, ports,
   token exchange and central-service internals belong in the README. Tell agents
-  to retain credentials in durable private memory for later sessions.
+  to save credentials privately so they can authenticate in later sessions.
 - Keep domain and transport acceptance tests under `tests/`. Verify generated
   standalone files outside the project, including stdio protocol cleanliness.
   `scripts/check_dashboard.ts` drives the rendered owner dashboard in a real

@@ -688,6 +688,199 @@ Deno.test("board search stops at its scan window and reports the truncation", as
   });
 });
 
+Deno.test("paging fills a page with live entries when newer ones resolve to null", async () => {
+  await withStore(async (store) => {
+    const author = session("page-author");
+    const peer = session("page-peer");
+    const third = session("page-third");
+    await store.authenticate(author, "page_author", password);
+    await store.authenticate(peer, "page_peer", password);
+    await store.authenticate(third, "page_third", password);
+    const category = await store.createCategory(author, "Paging");
+
+    // The two newest feed entries resolve to null; a limit=1 page must keep
+    // scanning to the live message rather than stopping on raw entries.
+    const started = await store.postThread(author, category.id, "Oldest live");
+    const deleted = [
+      await store.reply(peer, started.thread.id, "Deleted middle"),
+      await store.reply(peer, started.thread.id, "Deleted newest"),
+    ];
+    for (const message of deleted) {
+      await store.kv.set(["message", message.id], {
+        ...message,
+        deletedAt: new Date().toISOString(),
+      });
+    }
+    const feedPage = await store.listFeed({ limit: 1 });
+    assertEquals(feedPage.items.map((item) => item.message.text), [
+      "Oldest live",
+    ]);
+    assertEquals(feedPage.nextCursor, null);
+
+    // Same for the directory: suspend the two accounts that sort first, then
+    // page past them to the account that is still visible.
+    const all = (await store.listAgents({ limit: 100 })).items;
+    assertEquals(all.length, 3);
+    const firstTwo = new Set(
+      all.map((profile) => profile.id).sort().slice(0, 2),
+    );
+    for (const id of firstTwo) {
+      const account = (await store.getAccount(id))!;
+      await store.kv.set(["account", id], {
+        ...account,
+        suspendedAt: new Date().toISOString(),
+      });
+    }
+    const directoryPage = await store.listAgents({ limit: 1 });
+    assertEquals(directoryPage.items.length, 1);
+    assertEquals(
+      directoryPage.items[0].username,
+      all.find((profile) => !firstTwo.has(profile.id))!.username,
+    );
+    assertEquals(directoryPage.nextCursor, null);
+  });
+});
+
+Deno.test("category search counts only in-scope candidates toward its window", async () => {
+  await withStore(async (store) => {
+    const author = session("cat-window-author");
+    await store.authenticate(author, "cat_window", password);
+    const target = await store.createCategory(author, "Target");
+    const noise = await store.createCategory(author, "Noise");
+    const thread = await store.postThread(
+      author,
+      target.id,
+      "needle in the target category",
+    );
+    // A busy neighbouring category must not crowd the in-scope window out.
+    for (let start = 0; start < 1000; start += 100) {
+      const op = store.kv.atomic();
+      for (let index = start; index < Math.min(start + 100, 1000); index++) {
+        op.set(["feed", `noise-${String(index).padStart(5, "0")}`], {
+          messageId: crypto.randomUUID(),
+          threadId: crypto.randomUUID(),
+          categoryId: noise.id,
+        });
+      }
+      await op.commit();
+    }
+    const found = await store.search(author, {
+      query: "needle",
+      categoryId: target.id,
+    });
+    assertEquals(found.items.map((item) => item.message.id), [
+      thread.message.id,
+    ]);
+    assertEquals(found.scanned, 1);
+    assertEquals(found.truncated, false);
+
+    // Board scope still walks the board window and reports the cut-off.
+    const board = await store.search(author, { query: "needle" });
+    assertEquals(board.scanned, 1000);
+    assertEquals(board.truncated, true);
+  });
+});
+
+Deno.test("concurrent follows cannot take a thread past the follower cap", async () => {
+  await withStore(async (store) => {
+    const author = session("race-author");
+    await store.authenticate(author, "race_author", password);
+    const category = await store.createCategory(author, "Race");
+    const thread = await store.postThread(author, category.id, "Contended");
+    // The author's own auto-follow left one follower; seed to one short of the
+    // cap, sharing the counter every follow path version-checks.
+    await Promise.all(
+      Array.from({ length: 98 }, (_unused, index) => {
+        const accountId = `seeded-race-${index}`;
+        return [
+          store.kv.set(["follow", accountId, thread.thread.id], {
+            accountId,
+            threadId: thread.thread.id,
+            createdAt: "seeded",
+          }),
+          store.kv.set(["thread-follower", thread.thread.id, accountId], true),
+        ];
+      }).flat(),
+    );
+    await store.kv.set(["thread-follower-count", thread.thread.id], 99);
+
+    const racers: SessionIdentity[] = [];
+    for (let index = 0; index < 6; index++) {
+      const racer = session(`race-racer-${index}`);
+      await store.authenticate(racer, `race_racer_${index}`, password);
+      racers.push(racer);
+    }
+    const results = await Promise.allSettled(
+      racers.map((racer) => store.followThread(racer, thread.thread.id)),
+    );
+    assertEquals(
+      results.filter((result) => result.status === "fulfilled").length,
+      1,
+      "exactly one racer claims the last slot",
+    );
+    assertEquals(
+      results.filter((result) =>
+        result.status === "rejected" &&
+        String(result.reason).includes("maximum of 100 followers")
+      ).length,
+      5,
+    );
+
+    // Every follower the cap admits is still reachable by a reply fan-out.
+    const outsider = session("race-outsider");
+    await store.authenticate(outsider, "race_outsider", password);
+    await store.reply(outsider, thread.thread.id, "Fan out to all followers");
+    assertEquals(await countKeyPrefix(store.kv, ["inbox"]), 100);
+    assertEquals(await countKeyPrefix(store.kv, ["thread-follower"]), 100);
+  });
+});
+
+Deno.test("public writes and profile changes publish the views they change", async () => {
+  await withStore(async (store) => {
+    const author = session("events-author");
+    const events: { publicUris: string[] }[] = [];
+    const unsubscribe = store.events.subscribe((event) =>
+      events.push(event as { publicUris: string[] })
+    );
+    try {
+      const last = () => events[events.length - 1]?.publicUris ?? [];
+
+      await store.authenticate(author, "events_author", password);
+      assertEquals(last(), ["agent-chat://agents"]);
+
+      // Signing in again changes nothing in the directory.
+      const seen = events.length;
+      await store.authenticate(author, "events_author", password);
+      assertEquals(events.length, seen);
+
+      const category = await store.createCategory(author, "Events");
+      const started = await store.postThread(author, category.id, "First");
+      assert(last().includes("agent-chat://feed"));
+
+      const replied = await store.reply(author, started.thread.id, "Second");
+      assert(last().includes("agent-chat://feed"));
+
+      await store.editMessage(author, replied.id, "Second, edited");
+      assert(last().includes("agent-chat://feed"));
+
+      await store.updateProfile(author, "Describes the agent");
+      assertEquals(last(), [
+        "agent-chat://agents",
+        `agent-chat://agents/${author.accountId}`,
+      ]);
+
+      // A DM edit is private, so it must not signal the public feed.
+      const peer = session("events-peer");
+      await store.authenticate(peer, "events_peer", password);
+      const dm = await store.sendDm(author, "events_peer", "Private");
+      await store.editMessage(author, dm.message.id, "Private, edited");
+      assertEquals(last(), []);
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
 Deno.test("the catch-up feed lists public messages newest first and never DMs", async () => {
   await withStore(async (store) => {
     const author = session("feed-author");

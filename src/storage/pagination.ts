@@ -35,20 +35,24 @@ export async function listPage<T>(
   resolve: (entry: Deno.KvEntryMaybe<unknown>) => Promise<T | null>,
   reverse = false,
 ) {
-  const iter = kv.list({ prefix }, { cursor, limit: limit + 1, reverse });
+  // The iterator carries no entry budget of its own: resolvers drop deleted
+  // messages and suspended accounts, and a raw budget would return a short page
+  // with no cursor, hiding everything behind those entries. `nextPosition`
+  // follows the last returned entry, so entries that resolved to null are
+  // re-examined by the next page instead of being skipped.
+  const iter = kv.list({ prefix }, { cursor, reverse });
   const items: T[] = [];
   let nextPosition: string | undefined;
   let hasMore = false;
   for await (const entry of iter) {
+    const value = await resolve(entry);
+    if (value === null) continue;
     if (items.length === limit) {
       hasMore = true;
       break;
     }
-    const value = await resolve(entry);
-    if (value !== null) {
-      items.push(value);
-      nextPosition = iter.cursor;
-    }
+    items.push(value);
+    nextPosition = iter.cursor;
   }
   return {
     items,

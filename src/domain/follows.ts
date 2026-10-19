@@ -4,8 +4,8 @@ import { requireAccount } from "./identity.ts";
 /**
  * Upper bound on a thread's follower index. Reply notifications are written in
  * the same atomic commit as the message, so the follower set must stay small
- * enough for one commit; exceeding this bound rejects new explicit follows and
- * silently skips auto-follow.
+ * enough for one commit; the counter below enforces the bound in every commit
+ * that adds a follower.
  */
 export const MAX_THREAD_FOLLOWERS = 100;
 
@@ -13,6 +13,12 @@ export interface FollowRecord {
   accountId: string;
   threadId: string;
   createdAt: string;
+}
+
+/** Shared follower total for a thread, and the version it was read at. */
+export interface FollowerCount {
+  count: number;
+  versionstamp: string | null;
 }
 
 /** The forward and reverse halves of one follow, which must always agree. */
@@ -27,33 +33,35 @@ function followKeys(
   ]];
 }
 
+function followerCountKey(threadId: string) {
+  return ["thread-follower-count", threadId];
+}
+
 export class Follows {
   constructor(readonly kv: Deno.Kv) {}
 
   async follow(session: SessionIdentity, threadId: string) {
     const accountId = requireAccount(session);
     await this.readFollowableThread(threadId);
-    const [forwardKey] = followKeys(accountId, threadId);
-    for (let attempt = 0; attempt < 3; attempt++) {
-      if ((await this.kv.get(forwardKey)).value) break;
-      const followers = await this.followerIds(threadId);
-      if (followers.length >= MAX_THREAD_FOLLOWERS) {
-        throw new Error(
-          `This thread already has the maximum of ${MAX_THREAD_FOLLOWERS} followers.`,
-        );
-      }
-      const op = this.kv.atomic().check({
-        key: forwardKey,
-        versionstamp: null,
-      });
-      this.setFollower(op, threadId, accountId, new Date().toISOString());
-      if ((await op.commit()).ok) break;
+    const outcome = await this.addFollower(threadId, accountId);
+    if (outcome === "full") {
+      throw new Error(
+        `This thread already has the maximum of ${MAX_THREAD_FOLLOWERS} followers.`,
+      );
     }
-    return {
-      threadId,
-      following: true,
-      followers: (await this.followerIds(threadId)).length,
-    };
+    if (outcome === "conflict") {
+      throw new Error("The follower list changed repeatedly; retry.");
+    }
+    return await this.followState(threadId, true);
+  }
+
+  /**
+   * Follows a thread on behalf of someone who just posted in it. Never throws
+   * for a full or contended thread: the caller's write has already committed,
+   * so bookkeeping must not turn into a failure it would have to report.
+   */
+  async autoFollow(threadId: string, accountId: string) {
+    await this.addFollower(threadId, accountId);
   }
 
   /**
@@ -64,20 +72,32 @@ export class Follows {
   async unfollow(session: SessionIdentity, threadId: string) {
     const accountId = requireAccount(session);
     const [forwardKey, reverseKey] = followKeys(accountId, threadId);
-    await this.kv.atomic()
-      .delete(forwardKey)
-      .delete(reverseKey)
-      .commit();
-    return {
-      threadId,
-      following: false,
-      followers: (await this.followerIds(threadId)).length,
-    };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (!(await this.kv.get(forwardKey)).value) break;
+      const counter = await this.followerCount(threadId);
+      const op = this.kv.atomic()
+        .check({
+          key: followerCountKey(threadId),
+          versionstamp: counter.versionstamp,
+        })
+        .delete(forwardKey)
+        .delete(reverseKey);
+      if (counter.versionstamp !== null) {
+        op.set(followerCountKey(threadId), Math.max(counter.count - 1, 0));
+      }
+      if ((await op.commit()).ok) break;
+      if (attempt === 4) {
+        // A counter left too high only makes the cap stricter, so removal wins.
+        await this.kv.atomic().delete(forwardKey).delete(reverseKey).commit();
+      }
+    }
+    return await this.followState(threadId, false);
   }
 
   /**
-   * Follower account IDs for a thread in index order, read with one entry of
-   * headroom so callers can detect a full index without a second read.
+   * Follower account IDs for a thread in index order. The shared counter keeps
+   * the index at or below the cap, so the extra entry of headroom is only a
+   * guard against a counter that a hand-edited database left behind.
    */
   async followerIds(threadId: string) {
     const accountIds: string[] = [];
@@ -91,16 +111,74 @@ export class Follows {
     return accountIds;
   }
 
-  /** Adds a follower pair to the caller's open atomic commit. */
-  setFollower(
+  /**
+   * The shared follower total and the version the counter was read at. The
+   * stored counter is the slot every commit that adds or removes a follower
+   * version-checks, which is what serializes concurrent follows; the reported
+   * total is the larger of it and the index length, so a counter that lagged
+   * behind the index — a hand-edited database — can only make the cap stricter,
+   * never looser.
+   */
+  async followerCount(threadId: string): Promise<FollowerCount> {
+    const entry = await this.kv.get<number>(followerCountKey(threadId));
+    const indexed = (await this.followerIds(threadId)).length;
+    const stored = typeof entry.value === "number" ? entry.value : 0;
+    return {
+      count: Math.max(stored, indexed),
+      versionstamp: entry.versionstamp,
+    };
+  }
+
+  /** Adds a follower pair and bumps the shared counter in the caller's commit. */
+  private setFollower(
     op: Deno.AtomicOperation,
     threadId: string,
     accountId: string,
     createdAt: string,
+    counter: FollowerCount,
   ) {
     const record: FollowRecord = { accountId, threadId, createdAt };
     const [forwardKey, reverseKey] = followKeys(accountId, threadId);
-    op.set(forwardKey, record).set(reverseKey, true);
+    op.check({
+      key: followerCountKey(threadId),
+      versionstamp: counter.versionstamp,
+    })
+      .set(forwardKey, record)
+      .set(reverseKey, true)
+      .set(followerCountKey(threadId), counter.count + 1);
+  }
+
+  private async followState(threadId: string, following: boolean) {
+    return {
+      threadId,
+      following,
+      followers: (await this.followerCount(threadId)).count,
+    };
+  }
+
+  private async addFollower(
+    threadId: string,
+    accountId: string,
+  ): Promise<"added" | "already" | "full" | "conflict"> {
+    const [forwardKey] = followKeys(accountId, threadId);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if ((await this.kv.get(forwardKey)).value) return "already";
+      const counter = await this.followerCount(threadId);
+      if (counter.count >= MAX_THREAD_FOLLOWERS) return "full";
+      const op = this.kv.atomic().check({
+        key: forwardKey,
+        versionstamp: null,
+      });
+      this.setFollower(
+        op,
+        threadId,
+        accountId,
+        new Date().toISOString(),
+        counter,
+      );
+      if ((await op.commit()).ok) return "added";
+    }
+    return "conflict";
   }
 
   private async readFollowableThread(threadId: string) {

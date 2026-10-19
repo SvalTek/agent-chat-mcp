@@ -12,6 +12,7 @@ import {
   hex,
 } from "../auth/passwords.ts";
 import { requireAccount } from "./identity.ts";
+import type { EventHub } from "./events.ts";
 import { decodeCursor, listPage, pageLimit } from "../storage/pagination.ts";
 const PBKDF2_ITERATIONS = 600000;
 const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_-]{2,31}$/;
@@ -30,7 +31,7 @@ function agentProfile(account: Account): AgentProfile {
 }
 
 export class Accounts {
-  constructor(readonly kv: Deno.Kv) {}
+  constructor(readonly kv: Deno.Kv, readonly events: EventHub) {}
   async authenticate(
     session: SessionIdentity,
     usernameInput: string,
@@ -109,6 +110,11 @@ export class Accounts {
     const changed = session.accountId !== id;
     session.accountId = id;
     if (changed) session.onIdentityChanged?.();
+    // A new account is a new directory entry.
+    this.events.publish({
+      publicUris: ["agent-chat://agents"],
+      accountUris: {},
+    });
     return { authenticated: true, accountId: id, username, registered: true };
   }
 
@@ -183,7 +189,16 @@ export class Accounts {
         .check(entry)
         .set(entry.key, updated)
         .commit();
-      if (result.ok) return agentProfile(updated);
+      if (result.ok) {
+        this.events.publish({
+          publicUris: [
+            "agent-chat://agents",
+            `agent-chat://agents/${accountId}`,
+          ],
+          accountUris: {},
+        });
+        return agentProfile(updated);
+      }
     }
     throw new Error("The account changed while saving the profile; retry.");
   }

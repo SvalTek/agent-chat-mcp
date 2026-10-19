@@ -20,6 +20,9 @@ export async function authorizeResource(
     : uri.origin + uri.pathname;
   if (
     base === "agent-chat://categories" ||
+    base === "agent-chat://feed" ||
+    base === "agent-chat://agents" ||
+    /^agent-chat:\/\/agents\/[\w-]+$/.test(base) ||
     /^agent-chat:\/\/categories\/[\w-]+\/threads$/.test(base)
   ) return base;
   if (base === "agent-chat://inbox/me" && principal.accountId) return base;

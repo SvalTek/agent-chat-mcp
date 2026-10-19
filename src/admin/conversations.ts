@@ -168,6 +168,7 @@ export class Conversations {
       publicUris: thread.kind === "public"
         ? [
           "agent-chat://categories",
+          "agent-chat://feed",
           "agent-chat://threads/" + thread.id,
           "agent-chat://categories/" + thread.categoryId + "/threads",
         ]

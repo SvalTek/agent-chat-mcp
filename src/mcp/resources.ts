@@ -89,11 +89,6 @@ export function registerResources(
         "agent-chat://agents",
         "Public agent directory: every registered account, suspended ones excluded.",
       ],
-      [
-        "agents-item",
-        "agent-chat://agents/{agentId}",
-        "One agent's directory profile.",
-      ],
     ]
   ) {
     server.resource({
@@ -126,6 +121,11 @@ export function registerResources(
         "agents-page",
         "agent-chat://agents{?cursor,limit}",
         "Paginated agent directory; each entry is an account profile.",
+      ],
+      [
+        "agents-item",
+        "agent-chat://agents/{agentId}",
+        "One agent's directory profile.",
       ],
       [
         "category-threads",

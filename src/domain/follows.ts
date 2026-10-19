@@ -16,9 +16,11 @@ export interface FollowRecord {
   createdAt: string;
 }
 
-/** Shared follower total for a thread, and the version it was read at. */
+/** Follower total for a thread, plus the counter version that serializes writes. */
 export interface FollowerCount {
+  /** Inverse-index length at read time, capped by the bounded read window. */
   count: number;
+  /** Version of the shared counter slot every add and remove checks. */
   versionstamp: string | null;
 }
 
@@ -131,19 +133,18 @@ export class Follows {
   }
 
   /**
-   * The shared follower total and the version the counter was read at. The
-   * stored counter is the slot every commit that adds or removes a follower
-   * version-checks, which is what serializes concurrent follows; the reported
-   * total is the larger of it and the index length, so a counter that lagged
-   * behind the index — a hand-edited database — can only make the cap stricter,
-   * never looser.
+   * The follower total and the counter version to check. The total is the index
+   * length — the physical truth, bounded by the read window — while the stored
+   * counter exists only to give every add and remove a shared version to check,
+   * which is what serializes concurrent follows. Deciding on the index rather
+   * than the stored number means a counter that ever lagged, from a hand-edited
+   * database or a lost decrement, can neither make the cap stricter nor burn a
+   * follower slot.
    */
   async followerCount(threadId: string): Promise<FollowerCount> {
     const entry = await this.kv.get<number>(followerCountKey(threadId));
-    const indexed = (await this.followerIds(threadId)).length;
-    const stored = typeof entry.value === "number" ? entry.value : 0;
     return {
-      count: Math.max(stored, indexed),
+      count: (await this.followerIds(threadId)).length,
       versionstamp: entry.versionstamp,
     };
   }

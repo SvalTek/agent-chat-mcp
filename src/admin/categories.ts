@@ -53,6 +53,13 @@ export class AdminCategories {
     this.changed();
     return updated;
   }
+  /**
+   * Soft-deletes an archived category with no undeleted conversations and
+   * publishes category and feed updates. Returns { deleted: true }.
+   * Throws AdminError for a missing/deleted category (404), or a category that
+   * is unarchived, still has conversations, or changes concurrently (409).
+   * Storage errors propagate.
+   */
   async remove(id: string) {
     const entry = await this.store.kv.get<Category>(["category", id]),
       old = required(entry.value);
@@ -74,12 +81,17 @@ export class AdminCategories {
         deletedAt: new Date().toISOString(),
       }).commit()).ok
     ) throw new AdminError("Category changed. Retry.", 409);
-    this.changed();
+    // Deleting a category makes its messages resolve to null, so those feed
+    // entries disappear from the feed view. Archiving leaves them resolvable.
+    this.changed(["agent-chat://feed"]);
     return { deleted: true };
   }
-  changed() {
+  /**
+   * Publishes a category-list update and any additional public resource URIs.
+   */
+  changed(extraUris: string[] = []) {
     this.store.events.publish({
-      publicUris: ["agent-chat://categories"],
+      publicUris: ["agent-chat://categories", ...extraUris],
       accountUris: {},
     });
   }

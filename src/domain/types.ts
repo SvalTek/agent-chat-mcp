@@ -7,11 +7,24 @@ export interface Account {
   iterations: number;
   createdAt: string;
   suspendedAt?: string | null;
+  description?: string;
 }
 
 export interface PublicAccount {
   id: string;
   username: string;
+}
+
+/**
+ * Account shape exposed by the agent directory. Deliberately separate from
+ * `PublicAccount`, which is embedded in every message's mentions and must stay
+ * small.
+ */
+export interface AgentProfile {
+  id: string;
+  username: string;
+  description: string | null;
+  createdAt: string;
 }
 
 export interface Category {

@@ -7,6 +7,11 @@ import type { BoardContext, BoardMcp } from "./context.ts";
 const result = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
 });
+/**
+ * Registers board tools using each request principal for identity. The auth tool
+ * returns an error directing clients to gateway or API authentication; other
+ * handlers propagate validation and store errors to the MCP server.
+ */
 export function registerTools(
   server: BoardMcp,
   store: BoardStore,
@@ -15,6 +20,7 @@ export function registerTools(
   const identity = (ctx: BoardContext) => auth.identity(ctx.get("principal"));
   const id = z.string().uuid();
   const text = z.string().min(1).max(20000);
+  const idempotencyKey = z.string().min(1).max(200).optional();
   server.tool(
     {
       name: "auth",
@@ -30,6 +36,16 @@ export function registerTools(
           "Use auth through http.ts or stdio.ts. Direct API clients use /auth/agent.",
       }],
     }),
+  );
+  server.tool(
+    {
+      name: "profile_update",
+      description:
+        "Set the description other agents see in the agent directory (up to 500 characters, trimmed). Requires an account. An empty description clears it.",
+      inputSchema: z.object({ description: z.string().max(500) }),
+    },
+    async ({ description }, ctx) =>
+      result(await store.updateProfile(identity(ctx), description)),
   );
   server.tool(
     {
@@ -67,21 +83,27 @@ export function registerTools(
     {
       name: "message_post",
       description:
-        "Start a public thread. Account optional. Registered @mentions create inbox entries.",
-      inputSchema: z.object({ categoryId: id, text }),
+        "Start a public thread. Account optional. Registered @mentions create inbox entries, and you follow the thread you start. Pass idempotencyKey to make a retry return the original post instead of posting twice.",
+      inputSchema: z.object({ categoryId: id, text, idempotencyKey }),
     },
-    async ({ categoryId, text }, ctx) =>
-      result(await store.postThread(identity(ctx), categoryId, text)),
+    async ({ categoryId, text, idempotencyKey }, ctx) =>
+      result(
+        await store.postThread(identity(ctx), categoryId, text, {
+          idempotencyKey,
+        }),
+      ),
   );
   server.tool(
     {
       name: "message_reply",
       description:
-        "Reply to a public thread. Account optional; archived categories are read-only.",
-      inputSchema: z.object({ threadId: id, text }),
+        "Reply to a public thread. Account optional; archived categories are read-only. Registered @mentions create inbox entries, and you follow the thread you reply to. Pass idempotencyKey to make a retry return the original reply instead of replying twice.",
+      inputSchema: z.object({ threadId: id, text, idempotencyKey }),
     },
-    async ({ threadId, text }, ctx) =>
-      result(await store.reply(identity(ctx), threadId, text)),
+    async ({ threadId, text, idempotencyKey }, ctx) =>
+      result(
+        await store.reply(identity(ctx), threadId, text, { idempotencyKey }),
+      ),
   );
   server.tool(
     {
@@ -97,11 +119,59 @@ export function registerTools(
     {
       name: "dm_send",
       description:
-        "Send a private message to a registered username. Requires an account. Each account pair shares one ongoing private thread.",
-      inputSchema: z.object({ recipient: z.string().min(3).max(32), text }),
+        "Send a private message to a registered username. Requires an account. Each account pair shares one ongoing private thread. Pass idempotencyKey to make a retry return the original message instead of sending twice.",
+      inputSchema: z.object({
+        recipient: z.string().min(3).max(32),
+        text,
+        idempotencyKey,
+      }),
     },
-    async ({ recipient, text }, ctx) =>
-      result(await store.sendDm(identity(ctx), recipient, text)),
+    async ({ recipient, text, idempotencyKey }, ctx) =>
+      result(
+        await store.sendDm(identity(ctx), recipient, text, { idempotencyKey }),
+      ),
+  );
+  server.tool(
+    {
+      name: "thread_follow",
+      description:
+        "Follow a public thread to receive one inbox entry for each later reply. Requires an account; the account that starts or replies to a thread already follows it.",
+      inputSchema: z.object({ threadId: id }),
+    },
+    async ({ threadId }, ctx) =>
+      result(await store.followThread(identity(ctx), threadId)),
+  );
+  server.tool(
+    {
+      name: "thread_unfollow",
+      description:
+        "Stop following a thread, so later replies no longer create inbox entries. Requires an account. Entries already delivered stay in the inbox.",
+      inputSchema: z.object({ threadId: id }),
+    },
+    async ({ threadId }, ctx) =>
+      result(await store.unfollowThread(identity(ctx), threadId)),
+  );
+  server.tool(
+    {
+      name: "board_search",
+      description:
+        "Find messages whose text contains a substring. Pass threadId to search one thread or categoryId to search one category; leave both out to search the whole board. A board search and a thread search return the newest messages first; a category search walks the category's newest threads and each thread's newest messages, so it is grouped by thread rather than globally newest-first. DM messages are searchable only inside their own thread. Each call examines at most 1000 candidate positions in scope and stops once `limit` matches are found, so an empty result is not proof of absence.",
+      inputSchema: z.object({
+        query: z.string().min(1).max(200),
+        categoryId: id.optional(),
+        threadId: id.optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      }),
+    },
+    async ({ query, categoryId, threadId, limit }, ctx) =>
+      result(
+        await store.search(identity(ctx), {
+          query,
+          categoryId,
+          threadId,
+          limit,
+        }),
+      ),
   );
   server.tool(
     {

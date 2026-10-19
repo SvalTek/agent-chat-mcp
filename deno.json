@@ -10,7 +10,6 @@
     "@mcp-use/client": "npm:@mcp-use/client@2.4.4",
     "jose": "npm:jose@6.2.12",
     "@std/assert": "jsr:@std/assert@1.0.14",
-    "@mcp/client": "npm:@modelcontextprotocol/client@2.3.1",
     "@mcp/server": "npm:@modelcontextprotocol/server@2.3.1",
     "@mcp/server/stdio": "npm:@modelcontextprotocol/server@2.3.1/stdio",
     "playwright": "npm:playwright@1.64.1",
@@ -29,6 +28,7 @@
     "check": "deno fmt --check && deno lint && deno check main.ts http.ts stdio.ts tests/*.ts",
     "test": "deno test --unstable-kv --unstable-no-legacy-abort --allow-read --allow-write --allow-net --allow-env --allow-run=deno,git tests",
     "build:dashboard": "deno run -A npm:@tailwindcss/cli@4.3.3 -i src/dashboard/styles/app.css -o public/assets/dashboard.css --minify",
+    "backfill:feed": "deno run --unstable-kv --allow-read --allow-write --allow-env scripts/backfill_feed.ts",
     "build": "deno task build:dashboard && deno task build:gateways"
   },
   "compilerOptions": {

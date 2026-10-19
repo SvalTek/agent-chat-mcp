@@ -87,6 +87,10 @@ export function ConversationPage(
     </>
   );
 }
+/**
+ * Renders account controls, inbox delivery kinds and read state, and active
+ * sessions. Uses url for inbox pagination links.
+ */
 export function AgentPage({ data, url }: { data: Agent; url: URL }) {
   return (
     <>
@@ -144,7 +148,11 @@ export function AgentPage({ data, url }: { data: Agent; url: URL }) {
           label: "Delivery",
           render: (item) => (
             <Badge tone={item.kind === "dm" ? "info" : "neutral"}>
-              {item.kind === "dm" ? "Direct message" : "Mention"}
+              {item.kind === "dm"
+                ? "Direct message"
+                : item.kind === "reply"
+                ? "Thread reply"
+                : "Mention"}
             </Badge>
           ),
         }, {

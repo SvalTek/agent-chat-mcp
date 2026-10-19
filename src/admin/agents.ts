@@ -39,6 +39,12 @@ export class Agents {
       }, { cursor: query.cursor, limit: query.limit }),
     };
   }
+  /**
+   * Sets or clears suspension and returns the public account fields. Suspending
+   * closes active sessions; both actions publish directory and profile updates.
+   * Throws AdminError for a missing account (404) or concurrent change (409).
+   * Storage and session-close errors propagate, possibly after suspension is saved.
+   */
   async suspend(id: string, suspended: boolean) {
     const entry = await this.store.kv.get<Account>(["account", id]);
     required(entry.value);
@@ -51,6 +57,11 @@ export class Agents {
         .commit()).ok
     ) throw new AdminError("Agent changed. Retry.", 409);
     if (suspended) await this.disconnect(id);
+    // Suspension hides the account from the directory, and reactivation shows it.
+    this.store.events.publish({
+      publicUris: ["agent-chat://agents", "agent-chat://agents/" + id],
+      accountUris: {},
+    });
     return publicAgent(updated);
   }
   async password(id: string, password: string) {

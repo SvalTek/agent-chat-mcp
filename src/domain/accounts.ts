@@ -1,4 +1,9 @@
-import type { Account, PublicAccount, SessionIdentity } from "./types.ts";
+import type {
+  Account,
+  AgentProfile,
+  PublicAccount,
+  SessionIdentity,
+} from "./types.ts";
 import { readSettings } from "./settings.ts";
 import {
   constantTimeEqual,
@@ -6,14 +11,37 @@ import {
   hashPassword,
   hex,
 } from "../auth/passwords.ts";
+import { requireAccount } from "./identity.ts";
+import type { EventHub } from "./events.ts";
+import { decodeCursor, listPage, pageLimit } from "../storage/pagination.ts";
 const PBKDF2_ITERATIONS = 600000;
 const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_-]{2,31}$/;
+const MAX_DESCRIPTION_LENGTH = 500;
 function displayAccount(account: Account): PublicAccount {
   return { id: account.id, username: account.username };
 }
 
+function agentProfile(account: Account): AgentProfile {
+  return {
+    id: account.id,
+    username: account.username,
+    description: account.description ?? null,
+    createdAt: account.createdAt,
+  };
+}
+
 export class Accounts {
-  constructor(readonly kv: Deno.Kv) {}
+  constructor(readonly kv: Deno.Kv, readonly events: EventHub) {}
+  /**
+   * Registers an unclaimed username or verifies its password, then updates the
+   * session identity and invokes its change callback if the account changed.
+   * Usernames are NFKC-normalized and trimmed; lookup is case-insensitive.
+   * Returns whether registration occurred and publishes a directory update for it.
+   *
+   * @throws {Error} For invalid usernames, passwords outside 10–256 UTF-16 code
+   * units, unavailable accounts, incorrect credentials, or disabled registration.
+   * Storage, password hashing, and identity-change callback errors propagate.
+   */
   async authenticate(
     session: SessionIdentity,
     usernameInput: string,
@@ -92,11 +120,50 @@ export class Accounts {
     const changed = session.accountId !== id;
     session.accountId = id;
     if (changed) session.onIdentityChanged?.();
+    // A new account is a new directory entry.
+    this.events.publish({
+      publicUris: ["agent-chat://agents"],
+      accountUris: {},
+    });
     return { authenticated: true, accountId: id, username, registered: true };
   }
 
   async getAccount(id: string) {
     return (await this.kv.get<Account>(["account", id])).value;
+  }
+
+  /**
+   * Public agent directory. Accounts appear in stable storage-key order, not
+   * name order; suspended accounts are hidden. Pages are not snapshots.
+   * The limit defaults to 30 and is floored and clamped to 1–100. A bounded
+   * scan may return an empty page with a nextCursor; continue until it is null.
+   * Invalid or differently scoped cursors and storage failures propagate.
+   */
+  async listProfiles(options: { cursor?: string; limit?: number } = {}) {
+    const scope = "agent-directory";
+    const cursor = decodeCursor<string>(options.cursor, scope);
+    return await listPage<AgentProfile>(
+      this.kv,
+      ["account"],
+      scope,
+      cursor,
+      pageLimit(options.limit),
+      (entry) => {
+        const account = entry.value as Account;
+        return Promise.resolve(
+          account.suspendedAt ? null : agentProfile(account),
+        );
+      },
+    );
+  }
+
+  /**
+   * Returns the public directory profile, or null for a missing or suspended account.
+   * Storage failures propagate.
+   */
+  async getProfile(id: string) {
+    const account = await this.getAccount(id);
+    return account && !account.suspendedAt ? agentProfile(account) : null;
   }
 
   async resolveUsername(username: string) {
@@ -110,5 +177,50 @@ export class Accounts {
   async sessionUsername(session: SessionIdentity) {
     if (!session.accountId) return null;
     return (await this.getAccount(session.accountId))?.username ?? null;
+  }
+
+  /**
+   * Sets the description shown in the agent directory. An empty description
+   * clears it; the account record is replaced under a version check so a
+   * concurrent moderation write is never lost. Returns the saved profile and
+   * publishes updates for the directory and this account's profile.
+   *
+   * @throws {Error} If unauthenticated, the trimmed description exceeds 500
+   * UTF-16 code units, the account is missing, or three save attempts conflict.
+   * Storage failures propagate.
+   */
+  async updateProfile(
+    session: SessionIdentity,
+    descriptionInput: string,
+  ): Promise<AgentProfile> {
+    const accountId = requireAccount(session);
+    const description = descriptionInput.trim();
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      throw new Error(
+        `A profile description is limited to ${MAX_DESCRIPTION_LENGTH} characters.`,
+      );
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const entry = await this.kv.get<Account>(["account", accountId]);
+      if (!entry.value) throw new Error("Account not found.");
+      const updated: Account = { ...entry.value };
+      if (description) updated.description = description;
+      else delete updated.description;
+      const result = await this.kv.atomic()
+        .check(entry)
+        .set(entry.key, updated)
+        .commit();
+      if (result.ok) {
+        this.events.publish({
+          publicUris: [
+            "agent-chat://agents",
+            `agent-chat://agents/${accountId}`,
+          ],
+          accountUris: {},
+        });
+        return agentProfile(updated);
+      }
+    }
+    throw new Error("The account changed while saving the profile; retry.");
   }
 }

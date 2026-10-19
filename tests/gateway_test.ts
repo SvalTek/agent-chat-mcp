@@ -11,6 +11,16 @@ function value(result: { content?: unknown }) {
   const content = result.content as { type: string; text?: string }[];
   return JSON.parse(content.find((c) => c.type === "text")!.text!);
 }
+/** Joins the text blocks of a resource result, ignoring binary blocks. */
+function resourceText(result: { contents: unknown }) {
+  const contents = Array.isArray(result.contents) ? result.contents : [];
+  return contents.map((content) =>
+    content && typeof content === "object" && "text" in content &&
+      typeof content.text === "string"
+      ? content.text
+      : ""
+  ).join("");
+}
 const password = "correct horse battery staple";
 Deno.test({
   name:
@@ -54,10 +64,20 @@ Deno.test({
     try {
       const alice = await a.connect("board"), bob = await b.connect("board");
       assert((await alice.listTools()).some((t) => t.name === "auth"));
+      // The bundled skill is served from disk, as markdown, and documents the views.
+      const skill =
+        (await alice.readResource("agent-chat://skill")).contents[0];
       assert(
-        (await alice.readResource("agent-chat://skill")).contents.some((c) =>
-          "text" in c && c.text.includes("durable private memory")
-        ),
+        "text" in skill && skill.text.includes("agent-chat://inbox/me") &&
+          skill.text.length > 500,
+      );
+      // The directory is readable without an identity, and empty before anyone registers.
+      assertEquals(
+        JSON.parse(
+          resourceText(await alice.readResource("agent-chat://agents")),
+        )
+          .items.length,
+        0,
       );
       const status = await alice.callTool("auth", {
         username: "alice",
@@ -65,6 +85,36 @@ Deno.test({
       });
       assert(!JSON.stringify(status).includes("accessToken"));
       assert(value(status).authenticated);
+      assertEquals(
+        value(
+          await alice.callTool("profile_update", {
+            description: "Coordinates the release train.",
+          }),
+        ).description,
+        "Coordinates the release train.",
+      );
+      const directory = JSON.parse(
+        resourceText(await alice.readResource("agent-chat://agents")),
+      );
+      assertEquals(
+        directory.items.map((item: { username: string }) => item.username),
+        ["alice"],
+      );
+      assertEquals(
+        directory.items[0].description,
+        "Coordinates the release train.",
+      );
+      assertEquals(
+        JSON.parse(
+          resourceText(
+            await bob.readResource(
+              "agent-chat://agents/" + directory.items[0].id,
+            ),
+          ),
+        ).description,
+        "Coordinates the release train.",
+        "any client can read a listed profile",
+      );
       const category = value(
         await alice.callTool("category_create", { name: "Coordination" }),
       );
@@ -77,17 +127,88 @@ Deno.test({
       );
       assert(category.id !== category2.id);
       const page = await alice.readResource("agent-chat://categories?limit=1");
-      const parsed = JSON.parse((page.contents[0] as { text: string }).text);
+      const parsed = JSON.parse(resourceText(page));
       assertEquals(parsed.items.length, 1);
       assert(parsed.nextCursor);
       const next = await alice.readResource(
         "agent-chat://categories?limit=1&cursor=" +
           encodeURIComponent(parsed.nextCursor),
       );
-      assertEquals(
-        JSON.parse((next.contents[0] as { text: string }).text).items.length,
-        1,
+      assertEquals(JSON.parse(resourceText(next)).items.length, 1);
+
+      // One idempotency key may cover one write per tool: retries replay, tools stay distinct.
+      const posted = value(
+        await alice.callTool("message_post", {
+          categoryId: category.id,
+          text: "Idempotent post",
+          idempotencyKey: "gateway-retry-1",
+        }),
       );
+      const reposted = value(
+        await alice.callTool("message_post", {
+          categoryId: category.id,
+          text: "Idempotent post",
+          idempotencyKey: "gateway-retry-1",
+        }),
+      );
+      assertEquals(reposted.message.id, posted.message.id);
+      const replied = value(
+        await alice.callTool("message_reply", {
+          threadId: posted.thread.id,
+          text: "Idempotent reply",
+          idempotencyKey: "gateway-retry-1",
+        }),
+      );
+      const replayedReply = value(
+        await alice.callTool("message_reply", {
+          threadId: posted.thread.id,
+          text: "Idempotent reply",
+          idempotencyKey: "gateway-retry-1",
+        }),
+      );
+      assertEquals(replayedReply.id, replied.id);
+      assertEquals(
+        JSON.parse(
+          resourceText(
+            await alice.readResource(
+              "agent-chat://threads/" + posted.thread.id,
+            ),
+          ),
+        ).items.length,
+        2,
+      );
+      // Posting followed the thread; the follow tools round-trip through the adapter.
+      assertEquals(
+        value(
+          await alice.callTool("thread_follow", {
+            threadId: posted.thread.id,
+          }),
+        ).following,
+        true,
+      );
+      assertEquals(
+        value(
+          await alice.callTool("thread_unfollow", {
+            threadId: posted.thread.id,
+          }),
+        ).following,
+        false,
+      );
+      // Search is unaffected by the follow state; the second category stays out of scope.
+      const searched = value(
+        await alice.callTool("board_search", {
+          query: "idempotent",
+          categoryId: category.id,
+        }),
+      );
+      assertEquals(
+        searched.items.map((item: { message: { text: string } }) =>
+          item.message.text
+        ),
+        ["Idempotent reply", "Idempotent post"],
+      );
+      assertEquals(searched.scanned, 2);
+      assertEquals(searched.truncated, false);
 
       const updates: string[] = [];
       bob.on("notification", (event) => {
@@ -146,6 +267,22 @@ Deno.test({
       await alice.callTool("dm_send", { recipient: "bob", text: "Only Bob" });
       await new Promise((r) => setTimeout(r, 100));
       assertEquals(updates.length, 0);
+
+      // The new public views are subscribable, and the writes that change them
+      // signal their subscribers.
+      await bob.subscribeToResource("agent-chat://feed");
+      updates.length = 0;
+      await alice.callTool("message_post", {
+        categoryId: category.id,
+        text: "Feed subscriber ping",
+      });
+      await until(() => updates.includes("agent-chat://feed"));
+      await bob.subscribeToResource("agent-chat://agents");
+      updates.length = 0;
+      await alice.callTool("profile_update", {
+        description: "Pinging the directory",
+      });
+      await until(() => updates.includes("agent-chat://agents"));
       const anonymous = await auth.openSession();
       const p = await auth.verifyAgent(anonymous.accessToken);
       const refreshed = await auth.refresh(p);

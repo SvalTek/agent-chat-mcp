@@ -26,6 +26,15 @@ export function decodeCursor<T>(
 export function pageLimit(limit: number | undefined) {
   return Math.min(Math.max(Math.floor(limit ?? 30), 1), 100);
 }
+/**
+ * Resolves a page in KV key order, reversed when requested, skipping null
+ * results. cursor is the raw KV position decoded by the caller; scope labels
+ * the encoded nextCursor returned here. limit is the caller-normalized page size.
+ *
+ * Resolves at most limit * 4 + 32 entries per call. A short or empty page can
+ * still have a nextCursor; null marks exhaustion. Pages are not snapshots.
+ * Storage, resolver, and cursor-encoding errors propagate.
+ */
 export async function listPage<T>(
   kv: Deno.Kv,
   prefix: Deno.KvKey,
@@ -33,22 +42,42 @@ export async function listPage<T>(
   cursor: string | undefined,
   limit: number,
   resolve: (entry: Deno.KvEntryMaybe<unknown>) => Promise<T | null>,
+  reverse = false,
 ) {
-  const iter = kv.list({ prefix }, { cursor, limit: limit + 1 });
+  // A page is filled with resolved values, so entries a resolver drops — a
+  // deleted message, a suspended account — never hide the entries behind them.
+  // The scan stays bounded: one request examines at most this many index
+  // entries, and the cursor it returns resumes exactly where it stopped, so a
+  // run of dropped entries costs more requests rather than an unbounded one.
+  const budget = limit * 4 + 32;
+  const iter = kv.list({ prefix }, { cursor, reverse });
   const items: T[] = [];
-  let nextPosition: string | undefined;
+  let examinedThrough: string | undefined;
+  let returnedThrough: string | undefined;
+  let scanned = 0;
+  let filled = false;
   let hasMore = false;
   for await (const entry of iter) {
-    if (items.length === limit) {
+    if (scanned === budget) {
       hasMore = true;
       break;
     }
+    scanned++;
     const value = await resolve(entry);
-    if (value !== null) {
-      items.push(value);
-      nextPosition = iter.cursor;
+    examinedThrough = iter.cursor;
+    if (value === null) continue;
+    if (items.length === limit) {
+      filled = true;
+      hasMore = true;
+      break;
     }
+    items.push(value);
+    returnedThrough = iter.cursor;
   }
+  // Stopping with a full page leaves one examined entry unreturned, so the next
+  // page starts after the last returned entry and sees it again. Stopping at the
+  // budget has returned everything it examined, so it resumes after that.
+  const nextPosition = filled ? returnedThrough : examinedThrough;
   return {
     items,
     nextCursor: hasMore && nextPosition

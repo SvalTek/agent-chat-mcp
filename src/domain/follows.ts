@@ -46,6 +46,12 @@ function followerCountKey(threadId: string) {
   return ["thread-follower-count", threadId];
 }
 
+/** The thread and category entries a follow commit has to still find. */
+export interface ThreadGuards {
+  threadEntry: Deno.KvEntryMaybe<Thread>;
+  categoryEntry: Deno.KvEntryMaybe<Category>;
+}
+
 export class Follows {
   constructor(readonly kv: Deno.Kv) {}
 
@@ -60,14 +66,18 @@ export class Follows {
    */
   async follow(session: SessionIdentity, threadId: string) {
     const accountId = requireAccount(session);
+    // Fail fast with the caller's own error before touching the follower index.
     await this.readFollowableThread(threadId);
-    const result = await this.addFollower(threadId, accountId);
+    const result = await this.addFollower(threadId, accountId, true);
     if (result.outcome === "full") {
       throw new Error(
         `This thread already has the maximum of ${MAX_THREAD_FOLLOWERS} followers.`,
       );
     }
     if (result.outcome === "conflict") {
+      // Re-read before reporting contention: an owner who archived or deleted
+      // the thread mid-flight should hear that, not "retry".
+      await this.readFollowableThread(threadId);
       throw new Error("The follower list changed repeatedly; retry.");
     }
     return { threadId, following: true, followers: result.count };
@@ -228,6 +238,7 @@ export class Follows {
   private async addFollower(
     threadId: string,
     accountId: string,
+    validateThread = false,
   ): Promise<
     { outcome: "added" | "already" | "full"; count: number } | {
       outcome: "conflict";
@@ -238,6 +249,13 @@ export class Follows {
       const follower = await this.kv.get(forwardKey);
       const counter = await this.followerCount(threadId);
       if (follower.value) return { outcome: "already", count: counter.count };
+      // Refreshed every attempt: a benign rename or a reopened category between
+      // attempts would otherwise pin a versionstamp that can never match again,
+      // refusing a follow that the thread still allows. Refreshing before the
+      // cap check also means an unavailable thread reports that, not the cap.
+      const guards = validateThread
+        ? await this.readFollowableThread(threadId)
+        : null;
       if (counter.count >= MAX_THREAD_FOLLOWERS) {
         return { outcome: "full", count: counter.count };
       }
@@ -245,6 +263,9 @@ export class Follows {
         key: forwardKey,
         versionstamp: null,
       });
+      // The guard makes an archive or deletion mid-flight fail this commit
+      // rather than leave a follow nothing can use.
+      if (guards) op.check(guards.threadEntry, guards.categoryEntry);
       this.setFollower(
         op,
         threadId,
@@ -279,24 +300,24 @@ export class Follows {
    * Throws for missing or deleted threads or categories, private threads, and
    * archived categories; storage errors propagate.
    */
-  private async readFollowableThread(threadId: string) {
-    const entry = await this.kv.get<Thread>(["thread", threadId]);
-    if (!entry.value || entry.value.deletedAt) {
+  private async readFollowableThread(threadId: string): Promise<ThreadGuards> {
+    const threadEntry = await this.kv.get<Thread>(["thread", threadId]);
+    if (!threadEntry.value || threadEntry.value.deletedAt) {
       throw new Error("Thread not found.");
     }
-    if (entry.value.kind !== "public") {
+    if (threadEntry.value.kind !== "public") {
       throw new Error("Use dm_send for private conversations.");
     }
-    const category = await this.kv.get<Category>([
+    const categoryEntry = await this.kv.get<Category>([
       "category",
-      entry.value.categoryId!,
+      threadEntry.value.categoryId!,
     ]);
-    if (!category.value || category.value.deletedAt) {
+    if (!categoryEntry.value || categoryEntry.value.deletedAt) {
       throw new Error("Category not found.");
     }
-    if (category.value.archivedAt) {
+    if (categoryEntry.value.archivedAt) {
       throw new Error("This category is archived and read-only.");
     }
-    return entry.value;
+    return { threadEntry, categoryEntry };
   }
 }

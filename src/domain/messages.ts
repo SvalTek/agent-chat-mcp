@@ -337,16 +337,16 @@ export class Messages {
       if (idempotency) {
         this.recordIdempotentWrite(op, idempotency, { messageId, threadId });
       }
-      const guarded = snapshot.accountIds.length > 0;
-      if (guarded) {
-        this.follows.guardFollowerSnapshot(op, threadId, snapshot);
-      }
-      return { result: await op.commit(), recipients, guarded };
+      // Guarded unconditionally: with no followers today the commit writes no
+      // notification, but a follow landing inside the window still expects this
+      // reply, so an empty snapshot is exactly the case that must not be missed.
+      this.follows.guardFollowerSnapshot(op, threadId, snapshot);
+      return { result: await op.commit(), recipients };
     };
     let attempt = await commitReply();
-    // Only a commit that checked the follower index has a reason to retry; any
-    // other conflict would fail again on the same thread and category entries.
-    if (!attempt.result.ok && attempt.guarded) {
+    // The only conflict worth retrying is the follower index moving under the
+    // snapshot; a thread or category conflict fails the rebuilt attempt too.
+    if (!attempt.result.ok) {
       attempt = await commitReply();
     }
     const { result } = attempt;

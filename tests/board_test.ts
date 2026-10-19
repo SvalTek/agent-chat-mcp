@@ -4,6 +4,7 @@ import {
   BoardStore,
   type Category,
   type SessionIdentity,
+  type Thread,
 } from "../src/domain/board.ts";
 import { backfillFeed } from "../src/domain/feed.ts";
 import { getLogs } from "../src/infra/logs.ts";
@@ -1150,6 +1151,149 @@ Deno.test("an idempotent replay respects a deleted category", async () => {
       Error,
       "no longer available",
     );
+  });
+});
+
+Deno.test("a reply into a thread with no followers still retries", async () => {
+  await withStore(async (store) => {
+    const anonymous = session("empty-anonymous");
+    const replier = session("empty-replier");
+    await store.authenticate(replier, "empty_replier", password);
+    const category = await store.createCategory(replier, "Empty");
+    // An anonymous thread has no author follow, so the snapshot is empty and
+    // the guarded commit writes no inbox entry at all.
+    const thread = await store.postThread(
+      anonymous,
+      category.id,
+      "Started anonymously",
+    );
+    assertEquals(
+      (await store.listInbox(replier)).items.length,
+      0,
+      "no follower exists to notify yet",
+    );
+
+    const original = store.kv.atomic.bind(store.kv);
+    let failures = 1;
+    store.kv.atomic = () => {
+      const op = original();
+      const commit = op.commit.bind(op);
+      op.commit = () =>
+        failures-- > 0 ? Promise.resolve({ ok: false }) : commit();
+      return op;
+    };
+    let reply: { text: string };
+    try {
+      reply = await store.reply(replier, thread.thread.id, "Into the void");
+    } finally {
+      store.kv.atomic = original;
+    }
+    assertEquals(reply.text, "Into the void");
+    assertEquals(
+      (await store.listMessages(replier, thread.thread.id)).items.map((item) =>
+        item.text
+      ),
+      ["Started anonymously", "Into the void"],
+    );
+  });
+});
+
+Deno.test("a follow cannot outrun a category archived mid-flight", async () => {
+  await withStore(async (store) => {
+    const author = session("archive-race-author");
+    const peer = session("archive-race-peer");
+    await store.authenticate(author, "archive_race_author", password);
+    await store.authenticate(peer, "archive_race_peer", password);
+    const category = await store.createCategory(author, "Archive race");
+    const thread = await store.postThread(author, category.id, "Thread");
+    const categoryEntry = (await store.kv.get<Category>([
+      "category",
+      category.id,
+    ])).value!;
+
+    // The first commit archives the category and loses, which is what an owner
+    // archiving between the follow's validation and its commit looks like.
+    const original = store.kv.atomic.bind(store.kv);
+    let armed = true;
+    store.kv.atomic = () => {
+      const op = original();
+      const commit = op.commit.bind(op);
+      op.commit = async () => {
+        if (armed) {
+          armed = false;
+          await store.kv.set(["category", category.id], {
+            ...categoryEntry,
+            archivedAt: new Date().toISOString(),
+          });
+          return { ok: false };
+        }
+        return await commit();
+      };
+      return op;
+    };
+    let error: Error | null = null;
+    try {
+      await store.followThread(peer, thread.thread.id);
+    } catch (caught) {
+      error = caught as Error;
+    } finally {
+      store.kv.atomic = original;
+    }
+    assertEquals(
+      error?.message,
+      "This category is archived and read-only.",
+      "an archived category must be reported, not silent success",
+    );
+    assertEquals(await countKeyPrefix(store.kv, ["thread-follower"]), 1);
+  });
+});
+
+Deno.test("a follow survives a thread renamed mid-flight", async () => {
+  await withStore(async (store) => {
+    const author = session("rename-race-author");
+    const peer = session("rename-race-peer");
+    await store.authenticate(author, "rename_race_author", password);
+    await store.authenticate(peer, "rename_race_peer", password);
+    const category = await store.createCategory(author, "Rename race");
+    const thread = await store.postThread(author, category.id, "Thread");
+    const threadEntry = (await store.kv.get<Thread>([
+      "thread",
+      thread.thread.id,
+    ])).value!;
+
+    // A benign mutation — an admin renaming the thread — bumps the version the
+    // follow guarded on, while the thread stays perfectly followable.
+    const original = store.kv.atomic.bind(store.kv);
+    let armed = true;
+    store.kv.atomic = () => {
+      const op = original();
+      const commit = op.commit.bind(op);
+      op.commit = async () => {
+        if (armed) {
+          armed = false;
+          await store.kv.set(["thread", thread.thread.id], {
+            ...threadEntry,
+            title: "Renamed mid-flight",
+          });
+          return { ok: false };
+        }
+        return await commit();
+      };
+      return op;
+    };
+    let followed: { following: boolean; followers: number } | null = null;
+    try {
+      followed = await store.followThread(peer, thread.thread.id);
+    } finally {
+      store.kv.atomic = original;
+    }
+    assertEquals(
+      followed?.following,
+      true,
+      "a rename must not refuse a follow",
+    );
+    assertEquals(followed?.followers, 2);
+    assertEquals(await countKeyPrefix(store.kv, ["thread-follower"]), 2);
   });
 });
 

@@ -33,8 +33,9 @@ export async function listPage<T>(
   cursor: string | undefined,
   limit: number,
   resolve: (entry: Deno.KvEntryMaybe<unknown>) => Promise<T | null>,
+  reverse = false,
 ) {
-  const iter = kv.list({ prefix }, { cursor, limit: limit + 1 });
+  const iter = kv.list({ prefix }, { cursor, limit: limit + 1, reverse });
   const items: T[] = [];
   let nextPosition: string | undefined;
   let hasMore = false;

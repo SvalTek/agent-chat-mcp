@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "node:path";
 import { BoardStore, type SessionIdentity } from "../src/domain/board.ts";
+import { backfillFeed } from "../src/domain/feed.ts";
 
 async function withStore<T>(run: (store: BoardStore) => Promise<T>) {
   const directory = await Deno.makeTempDir({ prefix: "agent-chat-test-" });
@@ -416,5 +417,77 @@ Deno.test("idempotency keys replay one write instead of repeating it", async () 
     assertEquals(dmRetried.created, true);
     assertEquals((await store.listMessages(bob, dm.threadId)).items.length, 1);
     assertEquals(await countKeyPrefix(store.kv, ["inbox"]), 1);
+  });
+});
+
+Deno.test("the catch-up feed lists public messages newest first and never DMs", async () => {
+  await withStore(async (store) => {
+    const author = session("feed-author");
+    const peer = session("feed-peer");
+    await store.authenticate(author, "feed_author", password);
+    await store.authenticate(peer, "feed_peer", password);
+    const category = await store.createCategory(author, "Feed");
+    const thread = await store.postThread(
+      author,
+      category.id,
+      "First public message",
+    );
+    await store.sendDm(author, "feed_peer", "Private note");
+    const reply = await store.reply(
+      peer,
+      thread.thread.id,
+      "Second public message",
+    );
+
+    const feed = await store.listFeed();
+    assertEquals(
+      feed.items.map((item) => item.message.text),
+      ["Second public message", "First public message"],
+    );
+    assertEquals(feed.items[1].categoryId, category.id);
+    assertEquals(feed.items[1].threadId, thread.thread.id);
+    assertEquals(feed.items[1].messageId, thread.message.id);
+
+    const firstPage = await store.listFeed({ limit: 1 });
+    assertEquals(firstPage.items.map((item) => item.message.id), [reply.id]);
+    assert(firstPage.nextCursor);
+    const secondPage = await store.listFeed({
+      limit: 1,
+      cursor: firstPage.nextCursor,
+    });
+    assertEquals(
+      secondPage.items.map((item) => item.message.id),
+      [thread.message.id],
+    );
+
+    // A deleted message keeps its position but drops out of the feed.
+    await store.kv.set(["message", reply.id], {
+      ...reply,
+      deletedAt: new Date().toISOString(),
+    });
+    assertEquals(
+      (await store.listFeed()).items.map((item) => item.message.id),
+      [thread.message.id],
+    );
+
+    // Boards written before the feed existed are restored in place by the backfill.
+    for await (const entry of store.kv.list({ prefix: ["feed"] })) {
+      await store.kv.delete(entry.key);
+    }
+    assertEquals((await store.listFeed()).items.length, 0);
+    const backfilled = await backfillFeed(store.kv);
+    assertEquals(backfilled.indexed, 1);
+    assertEquals(
+      backfilled.skipped,
+      2,
+      "the deleted reply and the DM are skipped",
+    );
+    assertEquals(
+      (await store.listFeed()).items.map((item) => item.message.id),
+      [thread.message.id],
+    );
+    const repeated = await backfillFeed(store.kv);
+    assertEquals(repeated.indexed, 0);
+    assertEquals(repeated.alreadyIndexed, 1);
   });
 });

@@ -217,3 +217,204 @@ Deno.test("anonymous identity survives request objects; pagination and edited me
     );
   });
 });
+
+const password = "correct horse battery staple";
+
+async function countKeyPrefix(kv: Deno.Kv, prefix: Deno.KvKey) {
+  let count = 0;
+  for await (const _entry of kv.list({ prefix })) count++;
+  return count;
+}
+
+Deno.test("thread followers receive one reply notification each; unfollow stops them", async () => {
+  await withStore(async (store) => {
+    const author = session("follow-author");
+    const follower = session("follow-follower");
+    const mentioned = session("follow-mentioned");
+    const outsider = session("follow-outsider");
+    for (
+      const [current, username] of [
+        [author, "follow_author"],
+        [follower, "follow_follower"],
+        [mentioned, "follow_mentioned"],
+        [outsider, "follow_outsider"],
+      ] as const
+    ) {
+      await store.authenticate(current, username, password);
+    }
+    const category = await store.createCategory(author, "Follow");
+    const thread = await store.postThread(author, category.id, "Kickoff");
+    // The author follows the thread they started.
+    assertEquals(
+      (await store.followThread(follower, thread.thread.id)).followers,
+      2,
+    );
+
+    await store.reply(author, thread.thread.id, "Update for everyone");
+    const followerInbox = await store.listInbox(follower);
+    assertEquals(followerInbox.items.map((item) => item.kind), ["reply"]);
+    assertEquals(followerInbox.items[0].threadId, thread.thread.id);
+    assertEquals((await store.listInbox(author)).items.length, 0);
+
+    // A reply that mentions a follower notifies once, as a mention.
+    await store.reply(
+      author,
+      thread.thread.id,
+      "@follow_follower and @follow_mentioned",
+    );
+    assertEquals(
+      (await store.listInbox(follower)).items.map((item) => item.kind),
+      ["reply", "mention"],
+    );
+    assertEquals(
+      (await store.listInbox(mentioned)).items.map((item) => item.kind),
+      ["mention"],
+    );
+
+    // Replying follows the thread, so the outsider is notified from now on.
+    const outsiderReply = await store.reply(
+      outsider,
+      thread.thread.id,
+      "Joining in",
+    );
+    const authorInbox = await store.listInbox(author);
+    assertEquals(authorInbox.items.map((item) => item.kind), ["reply"]);
+    assertEquals(authorInbox.items[0].messageId, outsiderReply.id);
+    assertEquals(
+      (await store.followThread(outsider, thread.thread.id)).followers,
+      3,
+    );
+
+    assertEquals(
+      (await store.unfollowThread(follower, thread.thread.id)).following,
+      false,
+    );
+    await store.reply(outsider, thread.thread.id, "After the unfollow");
+    // The reply and mention entries stay; the reply after the unfollow adds none.
+    assertEquals((await store.listInbox(follower)).items.length, 3);
+    assertEquals((await store.listInbox(author)).items.length, 2);
+  });
+});
+
+Deno.test("a full follower index rejects new follows and still commits one reply fan-out", async () => {
+  await withStore(async (store) => {
+    const author = session("cap-author");
+    const replier = session("cap-replier");
+    await store.authenticate(author, "cap_author", password);
+    await store.authenticate(replier, "cap_replier", password);
+    const category = await store.createCategory(author, "Cap");
+    const thread = await store.postThread(author, category.id, "Crowded");
+    // The author plus 99 seeded accounts fill the index without hashing 100 passwords.
+    await Promise.all(
+      Array.from({ length: 99 }, (_unused, index) => {
+        const accountId = `seeded-${index}`;
+        return [
+          store.kv.set(["follow", accountId, thread.thread.id], {
+            accountId,
+            threadId: thread.thread.id,
+            createdAt: "seeded",
+          }),
+          store.kv.set(["thread-follower", thread.thread.id, accountId], true),
+        ];
+      }).flat(),
+    );
+
+    await assertRejects(
+      () => store.followThread(replier, thread.thread.id),
+      Error,
+      "maximum of 100 followers",
+    );
+    await store.reply(replier, thread.thread.id, "No room left");
+    // Fan-out to 100 followers commits, and the full index skips auto-follow.
+    assertEquals(await countKeyPrefix(store.kv, ["inbox"]), 100);
+    assertEquals(await countKeyPrefix(store.kv, ["thread-follower"]), 100);
+    assertEquals(await countKeyPrefix(store.kv, ["follow"]), 100);
+  });
+});
+
+Deno.test("idempotency keys replay one write instead of repeating it", async () => {
+  await withStore(async (store) => {
+    const alice = session("idem-alice");
+    const bob = session("idem-bob");
+    const anon = session("idem-anon");
+    await store.authenticate(alice, "idem_alice", password);
+    await store.authenticate(bob, "idem_bob", password);
+    const category = await store.createCategory(alice, "Retries");
+
+    const first = await store.postThread(alice, category.id, "Retry me", {
+      idempotencyKey: "post-1",
+    });
+    const retried = await store.postThread(alice, category.id, "Retry me", {
+      idempotencyKey: "post-1",
+    });
+    assertEquals(retried.thread.id, first.thread.id);
+    assertEquals(retried.message.id, first.message.id);
+    assertEquals(
+      (await store.listMessages(alice, first.thread.id)).items.length,
+      1,
+    );
+
+    // The same account from another session replays; another caller does not.
+    const aliceAgain = session("idem-alice-again");
+    await store.authenticate(aliceAgain, "idem_alice", password);
+    const replayedAcrossSessions = await store.postThread(
+      aliceAgain,
+      category.id,
+      "Retry me",
+      { idempotencyKey: "post-1" },
+    );
+    assertEquals(replayedAcrossSessions.message.id, first.message.id);
+    const anonymousPost = await store.postThread(
+      anon,
+      category.id,
+      "Retry me",
+      {
+        idempotencyKey: "post-1",
+      },
+    );
+    assert(anonymousPost.message.id !== first.message.id);
+
+    await assertRejects(
+      () =>
+        store.postThread(alice, category.id, "Different text", {
+          idempotencyKey: "post-1",
+        }),
+      Error,
+      "already used for a different write",
+    );
+    assertEquals(
+      await countKeyPrefix(store.kv, ["message"]),
+      2,
+      "a rejected reuse and a replay must not write a message",
+    );
+
+    const reply = await store.reply(alice, first.thread.id, "Reply once", {
+      idempotencyKey: "reply-1",
+    });
+    const replyRetried = await store.reply(
+      alice,
+      first.thread.id,
+      "Reply once",
+      {
+        idempotencyKey: "reply-1",
+      },
+    );
+    assertEquals(replyRetried.id, reply.id);
+    assertEquals(
+      (await store.listMessages(alice, first.thread.id)).items.length,
+      2,
+    );
+
+    const dm = await store.sendDm(alice, "idem_bob", "Private retry", {
+      idempotencyKey: "dm-1",
+    });
+    const dmRetried = await store.sendDm(alice, "idem_bob", "Private retry", {
+      idempotencyKey: "dm-1",
+    });
+    assertEquals(dmRetried.threadId, dm.threadId);
+    assertEquals(dmRetried.message.id, dm.message.id);
+    assertEquals(dmRetried.created, true);
+    assertEquals((await store.listMessages(bob, dm.threadId)).items.length, 1);
+    assertEquals(await countKeyPrefix(store.kv, ["inbox"]), 1);
+  });
+});

@@ -71,7 +71,7 @@ export function registerResources(
       [
         "inbox",
         "agent-chat://inbox/me",
-        "Account inbox of DMs and mentions. Reading does not mark entries read.",
+        "Account inbox of DMs, mentions and replies to followed threads. Reading does not mark entries read.",
       ],
     ]
   ) {

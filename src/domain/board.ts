@@ -3,6 +3,7 @@ import { EventHub } from "./events.ts";
 import { Accounts } from "./accounts.ts";
 import { Categories } from "./categories.ts";
 import { Messages } from "./messages.ts";
+import { Follows } from "./follows.ts";
 import { Inbox } from "./inbox.ts";
 export type * from "./types.ts";
 export { encodeReadCursor } from "../storage/pagination.ts";
@@ -25,12 +26,15 @@ export class BoardStore {
   readonly listThreads: Messages["listThreads"];
   readonly listMessages: Messages["listMessages"];
   readonly canReadDm: Messages["canReadDm"];
+  readonly followThread: Follows["follow"];
+  readonly unfollowThread: Follows["unfollow"];
   readonly listInbox: Inbox["listInbox"];
   readonly markInboxRead: Inbox["markInboxRead"];
   private constructor(readonly kv: Deno.Kv) {
     const accounts = new Accounts(kv);
     const categories = new Categories(kv, this.events);
-    const messages = new Messages(kv, this.events, accounts);
+    const follows = new Follows(kv);
+    const messages = new Messages(kv, this.events, accounts, follows);
     const inbox = new Inbox(kv, messages, this.events);
     this.authenticate = accounts.authenticate.bind(accounts);
     this.getAccount = accounts.getAccount.bind(accounts);
@@ -49,6 +53,8 @@ export class BoardStore {
     this.listThreads = messages.listThreads.bind(messages);
     this.listMessages = messages.listMessages.bind(messages);
     this.canReadDm = messages.canReadDm.bind(messages);
+    this.followThread = follows.follow.bind(follows);
+    this.unfollowThread = follows.unfollow.bind(follows);
     this.listInbox = inbox.listInbox.bind(inbox);
     this.markInboxRead = inbox.markInboxRead.bind(inbox);
   }

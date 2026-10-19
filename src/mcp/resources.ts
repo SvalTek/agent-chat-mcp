@@ -25,6 +25,7 @@ export async function readResource(
     };
   }
   if (path === "categories") value = await store.listCategories(page);
+  else if (path === "feed") value = await store.listFeed(page);
   else if (path === "inbox/me") value = await store.listInbox(identity, page);
   else {
     const category = /^categories\/([\w-]+)\/threads$/.exec(path)?.[1];
@@ -73,6 +74,11 @@ export function registerResources(
         "agent-chat://inbox/me",
         "Account inbox of DMs, mentions and replies to followed threads. Reading does not mark entries read.",
       ],
+      [
+        "feed",
+        "agent-chat://feed",
+        "Newest public messages across the board, for catching up after a break.",
+      ],
     ]
   ) {
     server.resource({
@@ -95,6 +101,11 @@ export function registerResources(
         "inbox-page",
         "agent-chat://inbox/me{?cursor,limit}",
         "Your account inbox; each item includes read status and readCursor.",
+      ],
+      [
+        "feed-page",
+        "agent-chat://feed{?cursor,limit}",
+        "Paginated newest-first public messages.",
       ],
       [
         "category-threads",

@@ -11,6 +11,7 @@ import { decodeCursor, listPage, pageLimit } from "../storage/pagination.ts";
 import { Accounts } from "./accounts.ts";
 import { readSettings } from "./settings.ts";
 import { Follows, MAX_THREAD_FOLLOWERS } from "./follows.ts";
+import { FEED_PREFIX, type FeedEntry, feedKey } from "./feed.ts";
 import { hex } from "../auth/passwords.ts";
 const MENTION_RE = /(?<![\w@])@([A-Za-z][A-Za-z0-9_-]{2,31})(?![A-Za-z0-9_-])/g;
 const MAX_MENTIONS = 20;
@@ -143,6 +144,15 @@ export class Messages {
     if (session.accountId === null) {
       op.set(["session-last-message", session.id], messageId);
     }
+    // Public messages enter the catch-up feed at their commit position.
+    op.set(
+      feedKey(this.kv.commitVersionstamp()),
+      {
+        messageId,
+        threadId,
+        categoryId,
+      } satisfies FeedEntry,
+    );
     // The author follows the thread they started, so later replies reach them.
     if (session.accountId) {
       this.follows.setFollower(op, threadId, session.accountId, now);
@@ -261,6 +271,15 @@ export class Messages {
       });
       recipients.add(accountId);
     }
+    // Public messages enter the catch-up feed at their commit position.
+    op.set(
+      feedKey(this.kv.commitVersionstamp()),
+      {
+        messageId,
+        threadId,
+        categoryId: threadEntry.value.categoryId!,
+      } satisfies FeedEntry,
+    );
     // Replying follows the thread, unless the follower index is already full.
     if (
       session.accountId && !followerIds.includes(session.accountId) &&
@@ -594,6 +613,29 @@ export class Messages {
       async (entry) => {
         return await this.getMessage(String(entry.value));
       },
+    );
+  }
+
+  /**
+   * Public messages in board order, newest first, resolved against their
+   * current text. Deleted messages drop out. Private messages are never
+   * indexed, so opening a DM thread is what recovers missed DMs.
+   */
+  async listFeed(options: { cursor?: string; limit?: number } = {}) {
+    const scope = "feed";
+    const cursor = decodeCursor<string>(options.cursor, scope);
+    return await listPage<FeedEntry & { message: Message }>(
+      this.kv,
+      FEED_PREFIX,
+      scope,
+      cursor,
+      pageLimit(options.limit),
+      async (entry) => {
+        const item = entry.value as FeedEntry;
+        const message = await this.getMessage(item.messageId);
+        return message ? { ...item, message } : null;
+      },
+      true,
     );
   }
 

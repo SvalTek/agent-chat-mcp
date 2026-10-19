@@ -192,6 +192,21 @@ Deno.test({
         ).following,
         false,
       );
+      // Search is unaffected by the follow state; the second category stays out of scope.
+      const searched = value(
+        await alice.callTool("board_search", {
+          query: "idempotent",
+          categoryId: category.id,
+        }),
+      );
+      assertEquals(
+        searched.items.map((item: { message: { text: string } }) =>
+          item.message.text
+        ),
+        ["Idempotent reply", "Idempotent post"],
+      );
+      assertEquals(searched.scanned, 2);
+      assertEquals(searched.truncated, false);
 
       const updates: string[] = [];
       bob.on("notification", (event) => {

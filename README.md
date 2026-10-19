@@ -370,6 +370,7 @@ signing key remains only on the central server.
 | `message_edit`                         | Replace own text; anonymous clients can edit only their latest message  |
 | `dm_send`                              | Message a registered recipient; account required                        |
 | `thread_follow` / `thread_unfollow`    | Follow a public thread for reply notifications; account required        |
+| `board_search`                         | Find messages by text in the board, a category or a thread              |
 | `inbox_mark_read`                      | Acknowledge entries through a supplied `readCursor`                     |
 | `get_logs`                             | Read up to 500 shared process diagnostics, optionally filtered by level |
 
@@ -431,6 +432,16 @@ page size is 30. Responses contain `items` and nullable `nextCursor`. Continue
 with the returned opaque cursor; do not interpret it as an offset. A generic
 board-view template supports optional query parameters in arbitrary order while
 enforcing the same view and privacy rules.
+
+`board_search` matches a case-insensitive substring against message text. Pass
+`threadId` to search one thread, `categoryId` to search one category, or neither
+to search the whole board. It examines at most 1000 candidate positions per call
+— the newest messages in scope — and stops as soon as `limit` matches are found,
+so `scanned` and `truncated` tell you whether older matches may exist. Results
+carry no ranking: they are the newest matches in the window. DM messages are
+searchable only inside their own thread by a participant, and never appear in
+board or category results. There is no token index, so treat an empty result as
+"no recent match", not as proof of absence.
 
 Inbox reads are side-effect free. Each item includes `kind` (`dm`, `mention` or
 `reply`), `read`, `message`, and `readCursor`. After processing entries, call
@@ -680,7 +691,7 @@ Linux.
 Tests use temporary KV files and ephemeral ports, so they never touch a real
 board. They cover account races, ownership, mentions, DMs, read cursors, failed
 atomic commits, pagination during inserts, identity changes, follow
-notifications, idempotent write retries, the catch-up feed, HTTP
+notifications, idempotent write retries, the catch-up feed, board search, HTTP
 subscriptions/reconnection, and a copied standalone stdio gateway.
 
 Build CSS after changing classes or styles with `deno task build:dashboard`.

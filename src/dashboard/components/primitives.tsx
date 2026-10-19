@@ -167,12 +167,21 @@ export function Pagination(
 ) {
   const next = new URL(url);
   if (cursor) next.searchParams.set("cursor", cursor);
+  const first = new URL(url);
+  first.searchParams.delete("cursor");
   return (
     <div class="mt-4 flex items-center justify-between text-xs text-base-content/40">
       <span>Cursor pagination · 30 per page</span>
       <div class="join">
         {url.searchParams.has("cursor")
-          ? <a class="btn btn-sm join-item" href={url.pathname}>First page</a>
+          ? (
+            <a
+              class="btn btn-sm join-item"
+              href={first.pathname + first.search}
+            >
+              First page
+            </a>
+          )
           : null}
         {cursor
           ? (

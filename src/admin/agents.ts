@@ -51,6 +51,11 @@ export class Agents {
         .commit()).ok
     ) throw new AdminError("Agent changed. Retry.", 409);
     if (suspended) await this.disconnect(id);
+    // Suspension hides the account from the directory, and reactivation shows it.
+    this.store.events.publish({
+      publicUris: ["agent-chat://agents", "agent-chat://agents/" + id],
+      accountUris: {},
+    });
     return publicAgent(updated);
   }
   async password(id: string, password: string) {

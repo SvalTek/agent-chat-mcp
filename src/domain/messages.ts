@@ -10,7 +10,7 @@ import { requireAccount } from "./identity.ts";
 import { decodeCursor, listPage, pageLimit } from "../storage/pagination.ts";
 import { Accounts } from "./accounts.ts";
 import { readSettings } from "./settings.ts";
-import { Follows, MAX_THREAD_FOLLOWERS } from "./follows.ts";
+import { Follows } from "./follows.ts";
 import { FEED_PREFIX, type FeedEntry, feedKey } from "./feed.ts";
 import { hex } from "../auth/passwords.ts";
 const MENTION_RE = /(?<![\w@])@([A-Za-z][A-Za-z0-9_-]{2,31})(?![A-Za-z0-9_-])/g;
@@ -165,9 +165,6 @@ export class Messages {
       } satisfies FeedEntry,
     );
     // The author follows the thread they started, so later replies reach them.
-    if (session.accountId) {
-      this.follows.setFollower(op, threadId, session.accountId, now);
-    }
     if (idempotency) {
       this.recordIdempotentWrite(op, idempotency, { messageId, threadId });
     }
@@ -184,6 +181,7 @@ export class Messages {
     this.events.publish({
       publicUris: [
         "agent-chat://categories",
+        "agent-chat://feed",
         `agent-chat://categories/${categoryId}/threads`,
         `agent-chat://threads/${threadId}`,
       ],
@@ -191,6 +189,10 @@ export class Messages {
         recipientIds.map((id) => [id, ["agent-chat://inbox/me"]]),
       ),
     });
+    // The author follows the thread they started, so later replies reach them.
+    if (session.accountId) {
+      await this.follows.autoFollow(threadId, session.accountId);
+    }
     return { thread, message };
   }
 
@@ -291,13 +293,6 @@ export class Messages {
         categoryId: threadEntry.value.categoryId!,
       } satisfies FeedEntry,
     );
-    // Replying follows the thread, unless the follower index is already full.
-    if (
-      session.accountId && !followerIds.includes(session.accountId) &&
-      followerIds.length < MAX_THREAD_FOLLOWERS
-    ) {
-      this.follows.setFollower(op, threadId, session.accountId, now);
-    }
     if (idempotency) {
       this.recordIdempotentWrite(op, idempotency, { messageId, threadId });
     }
@@ -315,6 +310,7 @@ export class Messages {
     const recipientIds = [...recipients];
     this.events.publish({
       publicUris: [
+        "agent-chat://feed",
         `agent-chat://threads/${threadId}`,
         `agent-chat://categories/${threadEntry.value.categoryId}/threads`,
       ],
@@ -322,6 +318,10 @@ export class Messages {
         recipientIds.map((id) => [id, ["agent-chat://inbox/me"]]),
       ),
     });
+    // Replying follows the thread, so later replies reach the replier.
+    if (session.accountId) {
+      await this.follows.autoFollow(threadId, session.accountId);
+    }
     return message;
   }
 
@@ -545,6 +545,9 @@ export class Messages {
     const uris = [`agent-chat://threads/${updated.threadId}`];
     if (thread?.kind === "dm") {
       uris.push(`agent-chat://dms/${updated.threadId}`);
+    } else if (thread) {
+      // The feed resolves message text live, so an edit changes its contents.
+      uris.push("agent-chat://feed");
     }
     const recipientIds = updated.mentions.map((account) => account.id);
     this.events.publish({
@@ -673,16 +676,13 @@ export class Messages {
       throw new Error("Search one thread or one category, not both.");
     }
     const limit = pageLimit(options.limit);
-    let prefix = FEED_PREFIX;
-    let threadCategoryId: string | null = null;
+    let thread: Thread | null = null;
     if (options.threadId) {
-      const thread = await this.getThread(options.threadId);
+      thread = await this.getThread(options.threadId);
       if (!thread) throw new Error("Thread not found.");
       if (
         thread.kind !== "public" && !await this.canReadDm(session, thread.id)
       ) throw new Error("Private conversation unavailable.");
-      prefix = ["thread-message", thread.id];
-      threadCategoryId = thread.categoryId;
     } else if (options.categoryId) {
       const category = await this.kv.get<Category>([
         "category",
@@ -697,34 +697,64 @@ export class Messages {
     const items: SearchItem[] = [];
     let scanned = 0;
     let truncated = false;
-    // One entry of headroom distinguishes "window cut off" from "index ended".
-    for await (
-      const entry of this.kv.list({ prefix }, {
-        limit: SEARCH_SCAN_LIMIT + 1,
-        reverse: true,
-      })
-    ) {
+    // Walks one candidate, and reports whether the caller should keep going.
+    // The window counts candidates that are in scope, so a category search is
+    // not crowded out by newer messages in other categories.
+    const examine = async (messageId: string, categoryId: string | null) => {
       if (scanned >= SEARCH_SCAN_LIMIT) {
         truncated = true;
-        break;
+        return false;
       }
       scanned++;
-      const messageId = options.threadId
-        ? String(entry.value)
-        : (entry.value as FeedEntry).messageId;
-      const categoryId = options.threadId
-        ? threadCategoryId
-        : (entry.value as FeedEntry).categoryId;
-      if (options.categoryId && categoryId !== options.categoryId) continue;
       const message = await this.getMessage(messageId);
-      if (!message || !message.text.toLowerCase().includes(needle)) continue;
+      if (!message || !message.text.toLowerCase().includes(needle)) return true;
       items.push({
         messageId: message.id,
         threadId: message.threadId,
         categoryId,
         message,
       });
-      if (items.length >= limit) break;
+      return items.length < limit;
+    };
+
+    if (thread) {
+      for await (
+        const entry of this.kv.list(
+          { prefix: ["thread-message", thread.id] },
+          { reverse: true },
+        )
+      ) {
+        if (!(await examine(String(entry.value), thread.categoryId))) break;
+      }
+    } else if (options.categoryId) {
+      let stop = false;
+      for await (
+        const entry of this.kv.list(
+          { prefix: ["category-thread", options.categoryId] },
+          { reverse: true },
+        )
+      ) {
+        if (stop) break;
+        const threadId = String(entry.value);
+        for await (
+          const message of this.kv.list(
+            { prefix: ["thread-message", threadId] },
+            { reverse: true },
+          )
+        ) {
+          if (!(await examine(String(message.value), options.categoryId))) {
+            stop = true;
+            break;
+          }
+        }
+      }
+    } else {
+      for await (
+        const entry of this.kv.list({ prefix: FEED_PREFIX }, { reverse: true })
+      ) {
+        const indexed = entry.value as FeedEntry;
+        if (!(await examine(indexed.messageId, indexed.categoryId))) break;
+      }
     }
     return { query, scanned, scanLimit: SEARCH_SCAN_LIMIT, truncated, items };
   }

@@ -36,7 +36,7 @@ export class BoardStore {
   readonly listInbox: Inbox["listInbox"];
   readonly markInboxRead: Inbox["markInboxRead"];
   private constructor(readonly kv: Deno.Kv) {
-    const accounts = new Accounts(kv);
+    const accounts = new Accounts(kv, this.events);
     const categories = new Categories(kv, this.events);
     const follows = new Follows(kv);
     const messages = new Messages(kv, this.events, accounts, follows);

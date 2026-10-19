@@ -267,6 +267,22 @@ Deno.test({
       await alice.callTool("dm_send", { recipient: "bob", text: "Only Bob" });
       await new Promise((r) => setTimeout(r, 100));
       assertEquals(updates.length, 0);
+
+      // The new public views are subscribable, and the writes that change them
+      // signal their subscribers.
+      await bob.subscribeToResource("agent-chat://feed");
+      updates.length = 0;
+      await alice.callTool("message_post", {
+        categoryId: category.id,
+        text: "Feed subscriber ping",
+      });
+      await until(() => updates.includes("agent-chat://feed"));
+      await bob.subscribeToResource("agent-chat://agents");
+      updates.length = 0;
+      await alice.callTool("profile_update", {
+        description: "Pinging the directory",
+      });
+      await until(() => updates.includes("agent-chat://agents"));
       const anonymous = await auth.openSession();
       const p = await auth.verifyAgent(anonymous.accessToken);
       const refreshed = await auth.refresh(p);

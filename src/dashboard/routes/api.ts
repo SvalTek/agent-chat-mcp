@@ -55,11 +55,13 @@ export function adminApi(admin: AdminServices) {
     return c.json({ username: session.username, csrf: session.csrf });
   });
   api.use("*", requireOwner(admin.owner, true, admin.integrations));
+  const ownerOnly = requireOwner(admin.owner, true);
   api.get(
     "/integrations",
+    ownerOnly,
     async (c) => c.json(await admin.integrations.list(query(c.req.url))),
   );
-  api.post("/integrations", async (c) => {
+  api.post("/integrations", ownerOnly, async (c) => {
     const input = z.object({
       clientId: z.string().min(3).max(32),
       accessLevel: z.enum(["admin", "user"]),
@@ -77,7 +79,7 @@ export function adminApi(admin: AdminServices) {
     );
     return c.json(result, 201);
   });
-  api.patch("/integrations/:id", async (c) => {
+  api.patch("/integrations/:id", ownerOnly, async (c) => {
     const input = z.object({
       accessLevel: z.enum(["admin", "user"]).optional(),
       rotate: z.boolean().optional(),
@@ -90,7 +92,7 @@ export function adminApi(admin: AdminServices) {
     );
     return c.json(result);
   });
-  api.delete("/integrations/:id", async (c) => {
+  api.delete("/integrations/:id", ownerOnly, async (c) => {
     const result = await admin.integrations.update(c.req.param("id"), {
       revoke: true,
     });
@@ -103,6 +105,7 @@ export function adminApi(admin: AdminServices) {
   });
   api.get(
     "/auth/me",
+    ownerOnly,
     async (c) =>
       c.json({
         username: c.get("owner").username,
@@ -110,12 +113,12 @@ export function adminApi(admin: AdminServices) {
         defaultPassword: (await admin.owner.owner()).defaultPassword,
       }),
   );
-  api.post("/auth/logout", async (c) => {
+  api.post("/auth/logout", ownerOnly, async (c) => {
     await admin.owner.logout(c.get("owner"));
     clearOwnerCookie(c);
     return c.json({ loggedOut: true });
   });
-  api.post("/auth/password", async (c) => {
+  api.post("/auth/password", ownerOnly, async (c) => {
     const input = z.object({
       currentPassword: z.string().min(1).max(256),
       newPassword: z.string().min(10).max(256),
@@ -304,6 +307,7 @@ export function adminApi(admin: AdminServices) {
   });
   api.get(
     "/access",
+    ownerOnly,
     async (c) =>
       c.json(
         await records<AccessTokenRecord>(
@@ -313,15 +317,13 @@ export function adminApi(admin: AdminServices) {
         ),
       ),
   );
-  api.post("/access", async (c) => {
+  api.post("/access", ownerOnly, async (c) => {
     const input = z.object({
-      kind: z.enum(["gateway", "api"]),
       label: z.string().min(1).max(80),
-      expiresIn: z.number().int().min(60).max(2592000).default(86400),
+      expiresIn: z.number().int().min(60).max(2592000).nullable().default(null),
     }).parse(await c.req.json());
     const result = await issueAccessToken(
       admin.auth,
-      input.kind,
       input.label,
       input.expiresIn,
     );
@@ -332,7 +334,7 @@ export function adminApi(admin: AdminServices) {
     );
     return c.json(result, 201);
   });
-  api.delete("/access/:id", async (c) => {
+  api.delete("/access/:id", ownerOnly, async (c) => {
     const entry = await admin.store.kv.get<AccessTokenRecord>([
       "access-token",
       c.req.param("id"),
@@ -344,6 +346,11 @@ export function adminApi(admin: AdminServices) {
         revokedAt: new Date().toISOString(),
       }).commit()).ok
     ) throw new AdminError("Token changed. Retry.", 409);
+    for (const session of [...admin.auth.sessions.values()]) {
+      if (session.gatewayId === record.id) {
+        await admin.auth.closeSession(session);
+      }
+    }
     await admin.audit.write(
       "token.revoked",
       record.id,

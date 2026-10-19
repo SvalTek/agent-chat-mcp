@@ -1,15 +1,16 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "node:path";
 import { BoardStore } from "../src/domain/board.ts";
-import { AuthService } from "../src/auth/service.ts";
+import { type AuthOptions, AuthService } from "../src/auth/service.ts";
 import { Integrations } from "../src/auth/integrations.ts";
 import { createApp } from "../src/app.ts";
 const password = "agent testing password";
-async function setup() {
+async function setup(authOptions: Partial<AuthOptions> = {}) {
   const dir = await Deno.makeTempDir({ prefix: "agent-chat-dashboard-" });
   const store = await BoardStore.open(join(dir, "board.kv"));
   const auth = new AuthService(store, {
     secret: "dashboard-test-secret-longer-than-32-characters",
+    ...authOptions,
   });
   const app = createApp({ store, auth });
   const request = (path: string, init: RequestInit = {}) =>
@@ -217,10 +218,20 @@ Deno.test("owner observes DMs, moderates messages, manages accounts/settings and
       )
     );
     const token = (await s.ownerApi("/access", "POST", {
-      kind: "gateway",
       label: "Integration test gateway",
     })).body;
+    assertEquals(token.record.expiresAt, null);
     assert(await s.auth.verifyPurpose(token.token, "agent-chat-gateway"));
+    const finite = (await s.ownerApi("/access", "POST", {
+      label: "Finite gateway",
+      expiresIn: 60,
+    })).body;
+    const finiteExpiry = Date.parse(finite.record.expiresAt!),
+      finiteBound = Date.now() + 60_000;
+    assert(
+      finiteExpiry > Date.now() && finiteExpiry <= finiteBound,
+      "a finite gateway token must expire about 60 seconds from now",
+    );
     await s.ownerApi("/access/" + token.record.id, "DELETE");
     await assertRejects(() =>
       s.auth.verifyPurpose(token.token, "agent-chat-gateway")
@@ -293,6 +304,82 @@ Deno.test("integration clientId is stable, user/admin access differs, and role c
     })).body;
     const adminBasic = "Basic " +
       btoa(adminResult.clientId + ":" + adminResult.token);
+    const issued = (await s.ownerApi("/access", "POST", {
+      label: "Owner-only probe",
+    })).body;
+    const escalation = [
+      await s.request("/api/admin/v1/integrations", {
+        headers: { authorization: adminBasic },
+      }),
+      await s.request("/api/admin/v1/integrations", {
+        method: "POST",
+        headers: {
+          authorization: adminBasic,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ clientId: "escalation", accessLevel: "admin" }),
+      }),
+      await s.request("/api/admin/v1/integrations/" + adminResult.record.id, {
+        method: "PATCH",
+        headers: {
+          authorization: adminBasic,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ accessLevel: "admin" }),
+      }),
+      await s.request("/api/admin/v1/integrations/" + user.record.id, {
+        method: "DELETE",
+        headers: { authorization: adminBasic },
+      }),
+      await s.request("/api/admin/v1/access", {
+        headers: { authorization: adminBasic },
+      }),
+      await s.request("/api/admin/v1/access", {
+        method: "POST",
+        headers: {
+          authorization: adminBasic,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ label: "escalation" }),
+      }),
+      await s.request("/api/admin/v1/access/" + issued.record.id, {
+        method: "DELETE",
+        headers: { authorization: adminBasic },
+      }),
+      await s.request("/api/admin/v1/auth/me", {
+        headers: { authorization: adminBasic },
+      }),
+      await s.request("/api/admin/v1/auth/logout", {
+        method: "POST",
+        headers: { authorization: adminBasic },
+      }),
+      await s.request("/api/admin/v1/auth/password", {
+        method: "POST",
+        headers: {
+          authorization: adminBasic,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          currentPassword: "irrelevant",
+          newPassword: "irrelevant password",
+        }),
+      }),
+    ];
+    for (const response of escalation) {
+      assertEquals(response.status, 401);
+      await response.text();
+    }
+    // The rejected attempts must not have changed any credential.
+    assertEquals(
+      (await s.auth.verifyPurpose(issued.token, "agent-chat-gateway")).aud,
+      "agent-chat-gateway",
+    );
+    const stillAdmin = await s.request("/api/admin/v1/overview", {
+      headers: { authorization: adminBasic },
+    });
+    assertEquals(stillAdmin.status, 200);
+    await stillAdmin.text();
+    assertEquals((await s.ownerApi("/integrations")).response.status, 200);
     const inspected = await s.request(
       "/api/admin/v1/conversations/" + dm.threadId,
       { headers: { authorization: adminBasic } },
@@ -333,6 +420,48 @@ Deno.test("integration clientId is stable, user/admin access differs, and role c
     });
     assertEquals(revoked.status, 401);
     await revoked.text();
+  } finally {
+    await s.close();
+  }
+});
+Deno.test("revoking a gateway token disconnects only the sessions it opened", async () => {
+  const s = await setup({ requireGateway: true });
+  try {
+    await s.ownerLogin();
+    const first = (await s.ownerApi("/access", "POST", {
+      label: "Revoked gateway",
+    })).body;
+    const second = (await s.ownerApi("/access", "POST", {
+      label: "Live gateway",
+    })).body;
+    const revokedSession = await s.auth.openSession(first.token),
+      liveSession = await s.auth.openSession(second.token);
+    assertEquals(
+      (await s.auth.verifyAgent(revokedSession.accessToken)).gatewayId,
+      first.record.id,
+    );
+    assertEquals(
+      (await s.auth.verifyAgent(liveSession.accessToken)).gatewayId,
+      second.record.id,
+    );
+    assertEquals(
+      (await s.ownerApi("/access/" + first.record.id, "DELETE")).response
+        .status,
+      200,
+    );
+    await assertRejects(() => s.auth.verifyAgent(revokedSession.accessToken));
+    assertEquals(
+      (await s.auth.verifyAgent(liveSession.accessToken)).sessionId,
+      liveSession.sessionId,
+    );
+    assertEquals(
+      [...s.auth.sessions.values()].filter((p) =>
+        p.gatewayId === first.record.id
+      ).length,
+      0,
+      "a revoked token must own no live sessions",
+    );
+    await assertRejects(() => s.auth.openSession(first.token));
   } finally {
     await s.close();
   }

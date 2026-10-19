@@ -42,7 +42,7 @@ src/
     passwords.ts                Salted password hashing and verification
     integrations.ts             Integration credential registry and rotation
     credentials.ts              Username/password schema for auth and /auth/agent
-    access-tokens.ts            Owner-issued gateway/read-only JWT bootstrap
+    access-tokens.ts            Owner-issued gateway installation-token registry
   domain/
     types.ts / identity.ts      Records and account requirements
     accounts.ts                 Registration, account lookup and profiles
@@ -102,8 +102,8 @@ tests/                          Domain and transport acceptance tests
 - **Authentication:** `src/auth/service.ts` uses jose to issue and verify
   purpose-specific JWTs and bind transient board sessions to account identities.
   Password hashing lives separately in `passwords.ts`. Use one signing and
-  verification implementation; distinct audiences/kinds/scopes separate board,
-  gateway and API tokens. Do not add Better Auth or a second login system.
+  verification implementation; distinct audiences separate board, gateway and
+  owner tokens. Do not add Better Auth or a second login system.
 - **MCP:** `src/mcp/server.ts` constructs mcp-use's stateless HTTP server. Hono
   bearer middleware verifies identity and stores a typed principal in request
   context; callbacks use `ctx.get("principal")`. Tool/resource declarations live
@@ -111,8 +111,8 @@ tests/                          Domain and transport acceptance tests
   JWT exchange; upstream clients supply `authToken`.
 - **HTTP API:** `src/http/api.ts` exposes anonymous-session creation, account
   authentication, token refresh/session closure, health, and public-board
-  reading through scoped API JWTs. API/gateway credentials cannot stand in for
-  board-user credentials.
+  reading for board and integration credentials. Gateway installation tokens
+  cannot stand in for board-user credentials.
 - **Realtime:** `src/http/realtime.ts` authenticates WebSockets using a board
   bearer in the first frame, authorizes each resource subscription, and maps
   committed domain events to resource-change hints. On identity changes, revoke
@@ -184,9 +184,10 @@ tests/                          Domain and transport acceptance tests
    downstream client's supported session/auth mechanism. A future stateless
    downstream transport must carry an explicit gateway-issued bearer identity;
    v1 serves the sessionful downstream protocol.
-6. Integrations exchange clientId/token credentials for board-user JWTs with
-   appropriate API audiences. Gateway bootstrap and legacy read-only JWTs retain
-   separate purposes and cannot replace board-session tokens.
+6. Integrations exchange clientId/token credentials for board-user JWTs. Admin
+   integration authority is the integration record's accessLevel. Gateway
+   installation tokens retain a separate purpose and cannot replace
+   board-session tokens.
 
 ## Owner dashboard and integrations
 
@@ -221,15 +222,18 @@ Create clientId/token credentials through the dashboard:
 - Atomically reserve clientId in the account username namespace and create a
   stable account ID, retained across reconnects and rotation.
 - Generate a random 256-bit token, show once and store only its hash.
-- `user` means ordinary agent permissions. `admin` means full owner API
-  permissions, including all DMs, accounts, credentials and settings.
+- `user` means ordinary agent permissions. `admin` means board management
+  permissions at `/api/admin/v1`, including all DMs, accounts, settings and
+  diagnostics, but not integration/gateway credentials or the owner password.
 - Accept Basic credentials on API/MCP; `/auth/integration` exchanges credentials
   for existing JWT/session flow. WebSockets use the exchanged bearer.
 - Offer roles, expiry, rotation and revocation. Invalidate exchanged sessions
   when access/credentials change; check current revision/expiry during
   verification.
-- Manage gateway bootstrap/read-only JWTs separately; CLI issuance uses the same
-  revocable registry. Revoked bootstrap tokens cannot open new board sessions.
+- Manage gateway installation tokens separately; CLI issuance uses the same
+  revocable registry and issues a token with no expiry. Revoked or expired
+  tokens cannot open new board sessions, refresh the sessions they created, or
+  re-authenticate an agent within them.
 
 Document pages/APIs, access levels, credential lifecycle, owner visibility,
 build steps and logical deletion. Verify owner redirects/API errors,
@@ -324,8 +328,8 @@ browser forms.
 ## Runtime and configuration
 
 - Central Hono service defaults to `127.0.0.1:8787`; accepts `--host`, `--port`
-  (including `0`), `--kv`, and `--issue-token gateway|api`, which prints a
-  one-off bootstrap token and exits instead of listening.
+  (including `0`), `--kv`, and `--issue-token gateway`, which prints a one-off
+  gateway installation token and exits instead of listening.
 - HTTP gateway defaults to `127.0.0.1:8788`; accepts `--server` (the central MCP
   URL), `--gateway-token`, `--host` and `--port`. Stdio gateway accepts the same
   central URL and does not autostart the service.

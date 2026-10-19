@@ -11,6 +11,7 @@ export interface AgentPrincipal {
   integrationId?: string;
   integrationRevision?: number;
   accessLevel?: "admin" | "user";
+  gatewayId?: string;
   clientName?: string;
   clientVersion?: string;
 }
@@ -20,6 +21,9 @@ export interface AuthOptions {
   ttlSeconds?: number;
   requireGateway?: boolean;
 }
+
+/** The installation credential that opened a gateway-bound session is gone. */
+export class StaleGatewayCredential extends Error {}
 
 export class AuthService {
   readonly sessions = new Map<string, AgentPrincipal>();
@@ -43,14 +47,16 @@ export class AuthService {
     audience: string | string[],
     subject: string,
     claims: Record<string, unknown>,
-    ttl = this.ttl,
+    ttl: number | null = this.ttl,
   ) {
-    return await new SignJWT(claims).setProtectedHeader({
+    const token = new SignJWT(claims).setProtectedHeader({
       alg: "HS256",
       typ: "JWT",
     })
       .setIssuer(this.issuer).setAudience(audience).setSubject(subject)
-      .setIssuedAt().setExpirationTime(String(ttl) + "s").sign(this.key);
+      .setIssuedAt();
+    if (ttl !== null) token.setExpirationTime(String(ttl) + "s");
+    return await token.sign(this.key);
   }
   async verifyPurpose(token: string, audience: string) {
     const payload = (await jwtVerify(token, this.key, {
@@ -60,12 +66,18 @@ export class AuthService {
     })).payload;
     if (payload.managed === true) {
       const record = typeof payload.jti === "string"
-        ? (await this.store.kv.get<{ revokedAt: string | null }>([
+        ? (await this.store.kv.get<
+          { revokedAt: string | null; expiresAt: string | null }
+        >([
           "access-token",
           payload.jti,
         ])).value
         : null;
-      if (!record || record.revokedAt) throw new Error("Access token revoked.");
+      if (
+        !record || record.revokedAt ||
+        (record.expiresAt !== null &&
+          Date.parse(record.expiresAt) <= Date.now())
+      ) throw new Error("Access token revoked or expired.");
     }
     if (typeof payload.integrationId === "string") {
       const record = (await this.store.kv.get<
@@ -80,14 +92,19 @@ export class AuthService {
     return payload;
   }
   async openSession(gatewayToken?: string) {
+    let gatewayId: string | undefined;
     if (this.options.requireGateway) {
       const payload = await this.verifyPurpose(
         gatewayToken ?? "",
         "agent-chat-gateway",
       );
-      if (payload.kind !== "gateway") {
+      if (
+        payload.kind !== "gateway" || payload.managed !== true ||
+        typeof payload.jti !== "string"
+      ) {
         throw new Error("Gateway credential required.");
       }
+      gatewayId = payload.jti;
     }
     await this.cleanupExpiredSessions();
     if (this.sessions.size >= 2000) {
@@ -98,10 +115,22 @@ export class AuthService {
       accountId: null,
       username: null,
       revision: 0,
+      ...(gatewayId ? { gatewayId } : {}),
       createdAt: new Date().toISOString(),
       lastSeenAt: new Date().toISOString(),
     };
     this.sessions.set(principal.sessionId, principal);
+    if (gatewayId) {
+      // A revoke can land between the credential check above and this insert;
+      // re-reading here means either the revoke sweep closes this session or
+      // this check rejects it, so neither order leaks a live session.
+      try {
+        await this.requireLiveGateway(principal);
+      } catch (error) {
+        await this.closeSession(principal);
+        throw error;
+      }
+    }
     return await this.tokenResult(principal);
   }
   async cleanupExpiredSessions() {
@@ -157,6 +186,26 @@ export class AuthService {
     if (session) Object.assign(session, metadata);
     return principal;
   }
+  /**
+   * Every path that mints a board bearer for an existing session is gated on
+   * the credential that opened it: refresh re-presents the token, and
+   * re-authentication consults the record. A lapsed token therefore cannot
+   * extend its sessions.
+   */
+  private async requireLiveGateway(principal: AgentPrincipal) {
+    if (!principal.gatewayId) return;
+    const record = (await this.store.kv.get<
+      { revokedAt: string | null; expiresAt: string | null }
+    >(["access-token", principal.gatewayId])).value;
+    if (
+      !record || record.revokedAt ||
+      (record.expiresAt !== null && Date.parse(record.expiresAt) <= Date.now())
+    ) {
+      throw new StaleGatewayCredential(
+        "Installation credential expired or revoked.",
+      );
+    }
+  }
   async authenticate(
     principal: AgentPrincipal,
     username: string,
@@ -165,6 +214,7 @@ export class AuthService {
     if (principal.integrationId) {
       throw new Error("Integration identity is fixed to its clientId.");
     }
+    await this.requireLiveGateway(principal);
     const session = this.identity(principal);
     const result = await this.store.authenticate(session, username, password);
     if (
@@ -180,7 +230,28 @@ export class AuthService {
     for (const listener of this.changed) listener(next.sessionId);
     return { ...await this.tokenResult(next), status: result };
   }
-  async refresh(principal: AgentPrincipal) {
+  async refresh(principal: AgentPrincipal, gatewayToken?: string) {
+    if (principal.gatewayId) {
+      let payload;
+      try {
+        payload = await this.verifyPurpose(
+          gatewayToken ?? "",
+          "agent-chat-gateway",
+        );
+      } catch {
+        throw new StaleGatewayCredential(
+          "Installation credential required, expired, or revoked.",
+        );
+      }
+      if (
+        payload.kind !== "gateway" || payload.managed !== true ||
+        payload.jti !== principal.gatewayId
+      ) {
+        throw new StaleGatewayCredential(
+          "Installation credential required, expired, or revoked.",
+        );
+      }
+    }
     return await this.tokenResult(principal);
   }
   async openIntegration(
@@ -221,11 +292,7 @@ export class AuthService {
     this.expires.set(principal.sessionId, Date.now() + this.ttl * 1000);
     return {
       accessToken: await this.issue(
-        principal.integrationId
-          ? (principal.accessLevel === "admin"
-            ? ["agent-chat-mcp", "agent-chat-admin-api", "agent-chat-api"]
-            : ["agent-chat-mcp", "agent-chat-api"])
-          : "agent-chat-mcp",
+        "agent-chat-mcp",
         principal.accountId ?? principal.sessionId,
         {
           sid: principal.sessionId,

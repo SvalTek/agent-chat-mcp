@@ -22,7 +22,7 @@ export function AccessTabs({ gateway = false }: { gateway?: boolean }) {
         class={"tab " + (gateway ? "tab-active" : "")}
         href="/access?view=gateways"
       >
-        Gateway & read-only tokens
+        Gateway tokens
       </a>
     </div>
   );
@@ -116,8 +116,10 @@ export function IntegrationsPage(
       <Pagination cursor={data.nextCursor} url={url} />
       <p class="mt-6 text-xs leading-5 text-base-content/40">
         User integrations act as their clientId with normal agent permissions.
-        Admin integrations can manage everything the owner can, including
-        private conversations. Tokens are shown once and stored as hashes.
+        Admin integrations manage board content, participants, settings and
+        diagnostics, including private conversations. Credential management,
+        gateway tokens and the owner password remain owner-only. Tokens are
+        shown once and stored as hashes.
       </p>
     </>
   );
@@ -129,7 +131,7 @@ export function GatewayAccessPage(
     <>
       <PageHeader
         title="Access credentials"
-        description="Bootstrap gateways or issue legacy read-only application tokens."
+        description="Bootstrap gateways with a revocable installation token."
       >
         <button type="button" class="btn btn-sm" data-action="create-access">
           Issue token
@@ -143,20 +145,28 @@ export function GatewayAccessPage(
             label: "Label",
             render: (r) => <span class="font-medium">{r.label}</span>,
           },
-          { label: "Purpose", render: (r) => <Badge>{r.kind}</Badge> },
           {
             label: "Status",
-            render: (r) => (
-              <Badge tone={r.revokedAt ? "error" : "neutral"}>
-                {r.revokedAt
-                  ? "Revoked"
-                  : Date.parse(r.expiresAt) <= Date.now()
-                  ? "Expired"
-                  : "Active"}
-              </Badge>
-            ),
+            render: (r) => {
+              const expired = r.expiresAt
+                ? Date.parse(r.expiresAt) <= Date.now()
+                : false;
+              return (
+                <Badge
+                  tone={r.revokedAt ? "error" : expired ? "warning" : "success"}
+                >
+                  {r.revokedAt ? "Revoked" : expired ? "Expired" : "Active"}
+                </Badge>
+              );
+            },
           },
-          { label: "Expires", render: (r) => <Time value={r.expiresAt} /> },
+          {
+            label: "Expires",
+            render: (r) =>
+              r.expiresAt
+                ? <Time value={r.expiresAt} />
+                : <span class="text-base-content/30">Never</span>,
+          },
           {
             label: "Manage",
             render: (r) =>
@@ -169,7 +179,7 @@ export function GatewayAccessPage(
                 ),
           },
         ]}
-        empty="No managed gateway or read-only tokens"
+        empty="No gateway tokens issued"
       />
       <Pagination cursor={data.nextCursor} url={url} />
     </>

@@ -204,13 +204,19 @@ export class Gateway {
       );
     }, Math.max(1000, data.expiresIn * 1000 - 30000));
   }
-  private async api(path: string, body?: unknown, method = "POST") {
+  private async api(
+    path: string,
+    body?: unknown,
+    method = "POST",
+    headers: Record<string, string> = {},
+  ) {
     const response = await fetch(new URL(path, this.base), {
       method,
       headers: {
         ...this.clientHeaders(),
         authorization: "Bearer " + this.token,
         "content-type": "application/json",
+        ...headers,
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(15000),
@@ -261,7 +267,16 @@ export class Gateway {
     const result = this.queue.then(async () => {
       if (this.closed) throw new Error("Gateway closed.");
       if (Date.now() >= this.expiresAt - 30000) {
-        this.setToken(await this.api("/auth/refresh"));
+        this.setToken(
+          await this.api(
+            "/auth/refresh",
+            undefined,
+            "POST",
+            this.options.gatewayToken
+              ? { "x-agent-chat-gateway-token": this.options.gatewayToken }
+              : {},
+          ),
+        );
         this.stopSocket();
         await this.connectMcp();
         if (this.subscriptions.size) await this.ensureSocket();

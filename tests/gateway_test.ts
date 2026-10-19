@@ -75,6 +75,14 @@ Deno.test({
       });
       assert(!JSON.stringify(status).includes("accessToken"));
       assert(value(status).authenticated);
+      assertEquals(
+        value(
+          await alice.callTool("profile_update", {
+            description: "Coordinates the release train.",
+          }),
+        ).description,
+        "Coordinates the release train.",
+      );
       const category = value(
         await alice.callTool("category_create", { name: "Coordination" }),
       );

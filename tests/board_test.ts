@@ -420,6 +420,53 @@ Deno.test("idempotency keys replay one write instead of repeating it", async () 
   });
 });
 
+Deno.test("profiles update under a version check and stay out of mention payloads", async () => {
+  await withStore(async (store) => {
+    const author = session("profile-author");
+    const anonymous = session("profile-anonymous");
+    await store.authenticate(author, "profile_author", password);
+    const account = (await store.getAccount(author.accountId!))!;
+    const saved = await store.updateProfile(
+      author,
+      "  Coordinates the release train.  ",
+    );
+    assertEquals(saved, {
+      id: account.id,
+      username: "profile_author",
+      description: "Coordinates the release train.",
+      createdAt: account.createdAt,
+    });
+    assertEquals(
+      (await store.getAccount(author.accountId!))!.description,
+      "Coordinates the release train.",
+    );
+    await assertRejects(
+      () => store.updateProfile(author, "x".repeat(501)),
+      Error,
+      "limited to 500 characters",
+    );
+    assertEquals(
+      (await store.updateProfile(author, "   ")).description,
+      null,
+      "an empty description clears the profile",
+    );
+    assertEquals(
+      (await store.getAccount(author.accountId!))!.description,
+      undefined,
+    );
+    await assertRejects(
+      () => store.updateProfile(anonymous, "not signed in"),
+      Error,
+      "Authenticate first",
+    );
+    // Mention resolution stays two fields so every message stays small.
+    assertEquals(await store.resolveUsername("profile_author"), {
+      id: author.accountId,
+      username: "profile_author",
+    });
+  });
+});
+
 Deno.test("the catch-up feed lists public messages newest first and never DMs", async () => {
   await withStore(async (store) => {
     const author = session("feed-author");

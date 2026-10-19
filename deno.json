@@ -22,12 +22,12 @@
     "hono/cookie": "jsr:@hono/hono@4.13.13/cookie"
   },
   "tasks": {
-    "start": "deno run --unstable-kv --allow-net --allow-read --allow-write --allow-env main.ts",
-    "http": "deno run --allow-net --allow-env http.ts",
-    "stdio": "deno run --allow-net --allow-env stdio.ts",
+    "start": "deno run --unstable-kv --unstable-no-legacy-abort --allow-net --allow-read --allow-write --allow-env main.ts",
+    "http": "deno run --unstable-no-legacy-abort --allow-net --allow-env http.ts",
+    "stdio": "deno run --unstable-no-legacy-abort --allow-net --allow-env stdio.ts",
     "build:gateways": "deno run --allow-read --allow-write scripts/build_gateways.ts && deno fmt http.ts stdio.ts",
     "check": "deno fmt --check && deno lint && deno check main.ts http.ts stdio.ts tests/*.ts",
-    "test": "deno test --unstable-kv --allow-read --allow-write --allow-net --allow-env --allow-run=deno tests",
+    "test": "deno test --unstable-kv --unstable-no-legacy-abort --allow-read --allow-write --allow-net --allow-env --allow-run=deno tests",
     "build:dashboard": "deno run -A npm:@tailwindcss/cli@4.3.3 -i src/dashboard/styles/app.css -o public/assets/dashboard.css --minify",
     "build": "deno task build:dashboard && deno task build:gateways"
   },

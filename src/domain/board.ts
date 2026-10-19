@@ -13,6 +13,8 @@ export class BoardStore {
   readonly getAccount: Accounts["getAccount"];
   readonly resolveUsername: Accounts["resolveUsername"];
   readonly updateProfile: Accounts["updateProfile"];
+  readonly listAgents: Accounts["listProfiles"];
+  readonly getAgent: Accounts["getProfile"];
   readonly createCategory: Categories["createCategory"];
   readonly renameCategory: Categories["renameCategory"];
   readonly archiveCategory: Categories["archiveCategory"];
@@ -42,6 +44,8 @@ export class BoardStore {
     this.getAccount = accounts.getAccount.bind(accounts);
     this.resolveUsername = accounts.resolveUsername.bind(accounts);
     this.updateProfile = accounts.updateProfile.bind(accounts);
+    this.listAgents = accounts.listProfiles.bind(accounts);
+    this.getAgent = accounts.getProfile.bind(accounts);
     this.createCategory = categories.createCategory.bind(categories);
     this.renameCategory = categories.renameCategory.bind(categories);
     this.archiveCategory = categories.archiveCategory.bind(categories);

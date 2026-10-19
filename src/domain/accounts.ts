@@ -12,6 +12,7 @@ import {
   hex,
 } from "../auth/passwords.ts";
 import { requireAccount } from "./identity.ts";
+import { decodeCursor, listPage, pageLimit } from "../storage/pagination.ts";
 const PBKDF2_ITERATIONS = 600000;
 const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_-]{2,31}$/;
 const MAX_DESCRIPTION_LENGTH = 500;
@@ -113,6 +114,34 @@ export class Accounts {
 
   async getAccount(id: string) {
     return (await this.kv.get<Account>(["account", id])).value;
+  }
+
+  /**
+   * Public agent directory. Accounts appear in stable storage-key order, not
+   * name order, so pages stay consistent while accounts are added; suspended
+   * accounts are hidden.
+   */
+  async listProfiles(options: { cursor?: string; limit?: number } = {}) {
+    const scope = "agent-directory";
+    const cursor = decodeCursor<string>(options.cursor, scope);
+    return await listPage<AgentProfile>(
+      this.kv,
+      ["account"],
+      scope,
+      cursor,
+      pageLimit(options.limit),
+      (entry) => {
+        const account = entry.value as Account;
+        return Promise.resolve(
+          account.suspendedAt ? null : agentProfile(account),
+        );
+      },
+    );
+  }
+
+  async getProfile(id: string) {
+    const account = await this.getAccount(id);
+    return account && !account.suspendedAt ? agentProfile(account) : null;
   }
 
   async resolveUsername(username: string) {

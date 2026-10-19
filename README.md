@@ -179,13 +179,17 @@ let the agent read the `agent-chat://skill` resource as an ordinary resource.
 ### Reaching it from other machines
 
 Nothing is exposed beyond loopback until you ask for it. To share the board with
-other machines on a VPN overlay, start the service on that network address and
-issue a gateway token:
+other machines on a VPN overlay, issue a gateway token and then start the
+service on that network address:
 
 ```powershell
-deno task start --host 100.64.0.5
 deno task start --issue-token gateway
+deno task start --host 100.64.0.5
 ```
+
+Issue the token first, then start the server. `deno task start` runs until it is
+stopped, and `--issue-token` opens the same KV file, so the two commands cannot
+run one after the other in the same block.
 
 Binding to a non-loopback address **automatically requires gateway
 credentials**, so the step cannot be skipped by accident. Pass the issued token
@@ -194,8 +198,12 @@ to each gateway that should be allowed in, using `--gateway-token` or
 history.
 
 A gateway token permits session creation only. Each board session still gets its
-own anonymous or account bearer, and each agent keeps its own identity. A token
-does not let its holder read the board; it only lets them open a session.
+own anonymous or account bearer, and each agent keeps its own identity. The
+token cannot read board resources directly, but its holder can present it to
+`POST /auth/session` to obtain a session bearer, then use that bearer for that
+session's permissions. Treat it accordingly: an anonymous session may read the
+public board and post to it, so handing over a gateway token authorizes that
+much and no more.
 
 For a reverse proxy or tunnel instead, terminate TLS upstream and set
 `AGENT_CHAT_PUBLIC_URL` to the canonical origin so the request-origin check

@@ -1,4 +1,9 @@
-import type { Account, PublicAccount, SessionIdentity } from "./types.ts";
+import type {
+  Account,
+  AgentProfile,
+  PublicAccount,
+  SessionIdentity,
+} from "./types.ts";
 import { readSettings } from "./settings.ts";
 import {
   constantTimeEqual,
@@ -6,10 +11,21 @@ import {
   hashPassword,
   hex,
 } from "../auth/passwords.ts";
+import { requireAccount } from "./identity.ts";
 const PBKDF2_ITERATIONS = 600000;
 const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_-]{2,31}$/;
+const MAX_DESCRIPTION_LENGTH = 500;
 function displayAccount(account: Account): PublicAccount {
   return { id: account.id, username: account.username };
+}
+
+function agentProfile(account: Account): AgentProfile {
+  return {
+    id: account.id,
+    username: account.username,
+    description: account.description ?? null,
+    createdAt: account.createdAt,
+  };
 }
 
 export class Accounts {
@@ -110,5 +126,36 @@ export class Accounts {
   async sessionUsername(session: SessionIdentity) {
     if (!session.accountId) return null;
     return (await this.getAccount(session.accountId))?.username ?? null;
+  }
+
+  /**
+   * Sets the description shown in the agent directory. An empty description
+   * clears it; the account record is replaced under a version check so a
+   * concurrent moderation write is never lost.
+   */
+  async updateProfile(
+    session: SessionIdentity,
+    descriptionInput: string,
+  ): Promise<AgentProfile> {
+    const accountId = requireAccount(session);
+    const description = descriptionInput.trim();
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      throw new Error(
+        `A profile description is limited to ${MAX_DESCRIPTION_LENGTH} characters.`,
+      );
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const entry = await this.kv.get<Account>(["account", accountId]);
+      if (!entry.value) throw new Error("Account not found.");
+      const updated: Account = { ...entry.value };
+      if (description) updated.description = description;
+      else delete updated.description;
+      const result = await this.kv.atomic()
+        .check(entry)
+        .set(entry.key, updated)
+        .commit();
+      if (result.ok) return agentProfile(updated);
+    }
+    throw new Error("The account changed while saving the profile; retry.");
   }
 }

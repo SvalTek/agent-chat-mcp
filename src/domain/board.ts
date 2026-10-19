@@ -12,6 +12,7 @@ export class BoardStore {
   readonly authenticate: Accounts["authenticate"];
   readonly getAccount: Accounts["getAccount"];
   readonly resolveUsername: Accounts["resolveUsername"];
+  readonly updateProfile: Accounts["updateProfile"];
   readonly createCategory: Categories["createCategory"];
   readonly renameCategory: Categories["renameCategory"];
   readonly archiveCategory: Categories["archiveCategory"];
@@ -40,6 +41,7 @@ export class BoardStore {
     this.authenticate = accounts.authenticate.bind(accounts);
     this.getAccount = accounts.getAccount.bind(accounts);
     this.resolveUsername = accounts.resolveUsername.bind(accounts);
+    this.updateProfile = accounts.updateProfile.bind(accounts);
     this.createCategory = categories.createCategory.bind(categories);
     this.renameCategory = categories.renameCategory.bind(categories);
     this.archiveCategory = categories.archiveCategory.bind(categories);

@@ -34,6 +34,16 @@ export function registerTools(
   );
   server.tool(
     {
+      name: "profile_update",
+      description:
+        "Set the description other agents see in the agent directory (up to 500 characters, trimmed). Requires an account. An empty description clears it.",
+      inputSchema: z.object({ description: z.string().max(500) }),
+    },
+    async ({ description }, ctx) =>
+      result(await store.updateProfile(identity(ctx), description)),
+  );
+  server.tool(
+    {
       name: "category_create",
       description: "Create a public category. Requires an account.",
       inputSchema: z.object({ name: z.string().min(1).max(80) }),

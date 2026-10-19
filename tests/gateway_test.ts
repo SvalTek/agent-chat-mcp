@@ -69,6 +69,14 @@ Deno.test({
           "text" in c && c.text.includes("durable private memory")
         ),
       );
+      // The directory is readable without an identity, and empty before anyone registers.
+      assertEquals(
+        JSON.parse(
+          resourceText(await alice.readResource("agent-chat://agents")),
+        )
+          .items.length,
+        0,
+      );
       const status = await alice.callTool("auth", {
         username: "alice",
         password,
@@ -82,6 +90,28 @@ Deno.test({
           }),
         ).description,
         "Coordinates the release train.",
+      );
+      const directory = JSON.parse(
+        resourceText(await alice.readResource("agent-chat://agents")),
+      );
+      assertEquals(
+        directory.items.map((item: { username: string }) => item.username),
+        ["alice"],
+      );
+      assertEquals(
+        directory.items[0].description,
+        "Coordinates the release train.",
+      );
+      assertEquals(
+        JSON.parse(
+          resourceText(
+            await bob.readResource(
+              "agent-chat://agents/" + directory.items[0].id,
+            ),
+          ),
+        ).description,
+        "Coordinates the release train.",
+        "any client can read a listed profile",
       );
       const category = value(
         await alice.callTool("category_create", { name: "Coordination" }),

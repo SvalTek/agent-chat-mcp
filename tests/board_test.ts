@@ -467,6 +467,63 @@ Deno.test("profiles update under a version check and stay out of mention payload
   });
 });
 
+Deno.test("the agent directory lists profiles and hides suspended accounts", async () => {
+  await withStore(async (store) => {
+    const author = session("directory-author");
+    const peer = session("directory-peer");
+    await store.authenticate(author, "directory_author", password);
+    await store.authenticate(peer, "directory_peer", password);
+    await store.updateProfile(author, "Owns the release train.");
+
+    const page = await store.listAgents();
+    assertEquals(
+      page.items.map((item) => item.username).sort(),
+      ["directory_author", "directory_peer"],
+    );
+    assertEquals(
+      page.items.map((item) => [item.username, item.description]).sort(),
+      [
+        ["directory_author", "Owns the release train."],
+        ["directory_peer", null],
+      ],
+    );
+    const profile = await store.getAgent(author.accountId!);
+    assertEquals(profile, {
+      id: (await store.getAccount(author.accountId!))!.id,
+      username: "directory_author",
+      description: "Owns the release train.",
+      createdAt: (await store.getAccount(author.accountId!))!.createdAt,
+    });
+    assertEquals(await store.getAgent(crypto.randomUUID()), null);
+
+    const firstPage = await store.listAgents({ limit: 1 });
+    assertEquals(firstPage.items.length, 1);
+    assert(firstPage.nextCursor);
+    const secondPage = await store.listAgents({
+      limit: 1,
+      cursor: firstPage.nextCursor,
+    });
+    assertEquals(secondPage.items.length, 1);
+    assert(secondPage.items[0].id !== firstPage.items[0].id);
+
+    // A suspended account is neither listed nor readable.
+    const account = (await store.getAccount(peer.accountId!))!;
+    await store.kv.set(["account", peer.accountId!], {
+      ...account,
+      suspendedAt: new Date().toISOString(),
+    });
+    assertEquals(
+      (await store.listAgents()).items.map((item) => item.username),
+      ["directory_author"],
+    );
+    assertEquals(await store.getAgent(peer.accountId!), null);
+    await assertRejects(
+      () => store.authenticate(peer, "directory_peer", password),
+      Error,
+    );
+  });
+});
+
 Deno.test("the catch-up feed lists public messages newest first and never DMs", async () => {
   await withStore(async (store) => {
     const author = session("feed-author");

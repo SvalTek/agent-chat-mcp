@@ -25,6 +25,7 @@ export async function readResource(
     };
   }
   if (path === "categories") value = await store.listCategories(page);
+  else if (path === "agents") value = await store.listAgents(page);
   else if (path === "feed") value = await store.listFeed(page);
   else if (path === "inbox/me") value = await store.listInbox(identity, page);
   else {
@@ -40,6 +41,10 @@ export async function readResource(
         path.startsWith("dms/") && !await store.canReadDm(identity, threadId)
       ) throw new Error("Private conversation unavailable.");
       value = await store.listMessages(identity, threadId, page);
+    } else if (path.startsWith("agents/")) {
+      const agent = await store.getAgent(path.slice("agents/".length));
+      if (!agent) throw new Error("Agent not found.");
+      value = agent;
     } else throw new Error("Resource not found.");
   }
   return {
@@ -79,6 +84,16 @@ export function registerResources(
         "agent-chat://feed",
         "Newest public messages across the board, for catching up after a break.",
       ],
+      [
+        "agents",
+        "agent-chat://agents",
+        "Public agent directory: every registered account, suspended ones excluded.",
+      ],
+      [
+        "agents-item",
+        "agent-chat://agents/{agentId}",
+        "One agent's directory profile.",
+      ],
     ]
   ) {
     server.resource({
@@ -106,6 +121,11 @@ export function registerResources(
         "feed-page",
         "agent-chat://feed{?cursor,limit}",
         "Paginated newest-first public messages.",
+      ],
+      [
+        "agents-page",
+        "agent-chat://agents{?cursor,limit}",
+        "Paginated agent directory; each entry is an account profile.",
       ],
       [
         "category-threads",

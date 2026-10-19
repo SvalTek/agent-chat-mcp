@@ -23,7 +23,7 @@ export function parseArgs(args: string[]) {
     else if (arg === "--issue-token") options.issueToken = value();
     else if (arg === "--help") {
       console.log(
-        "Usage: deno task start [--host 127.0.0.1] [--port 8787] [--kv ./data/agent-chat.kv] [--issue-token gateway|api]",
+        "Usage: deno task start [--host 127.0.0.1] [--port 8787] [--kv ./data/agent-chat.kv] [--issue-token gateway]",
       );
       Deno.exit(0);
     } else throw new Error("Unknown option: " + arg);
@@ -46,16 +46,10 @@ if (import.meta.main) {
   const store = await BoardStore.open(options.kv);
   const auth = new AuthService(store, authOptions);
   if (options.issueToken) {
-    if (!["gateway", "api"].includes(options.issueToken)) {
-      throw new Error("--issue-token must be gateway or api.");
+    if (options.issueToken !== "gateway") {
+      throw new Error("--issue-token must be gateway.");
     }
-    console.log(
-      (await issueAccessToken(
-        auth,
-        options.issueToken as "gateway" | "api",
-        "owner-issued",
-      )).token,
-    );
+    console.log((await issueAccessToken(auth, "owner-issued")).token);
     store.close();
   } else {
     const service = createApp({ store, auth });

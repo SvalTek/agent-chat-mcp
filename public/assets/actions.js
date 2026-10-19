@@ -199,28 +199,20 @@ export async function handleAction(button) {
   }
   if (action === "create-access") {
     return openAction({
-      title: "Issue gateway or read-only token",
+      title: "Issue gateway token",
       path: "/access",
       method: "POST",
       fields: [{ name: "label", label: "Label" }, {
-        name: "kind",
-        label: "Purpose",
-        options: [["gateway", "Gateway bootstrap"], [
-          "api",
-          "Legacy read-only API",
-        ]],
-        value: "gateway",
-      }, {
         name: "days",
-        label: "Expires in days",
+        label: "Expires in days (blank = never)",
         type: "number",
-        value: "1",
+        value: "",
         max: 30,
+        required: false,
       }],
       body: (v) => ({
         label: v.label,
-        kind: v.kind,
-        expiresIn: Number(v.days) * 86400,
+        expiresIn: v.days ? Number(v.days) * 86400 : null,
       }),
       submit: "Issue token",
     });
@@ -229,7 +221,7 @@ export async function handleAction(button) {
     return confirmAction(
       "Revoke access token",
       "/access/" + p,
-      "This prevents future authentication with this token. Existing gateway-created board sessions have their own lifecycle.",
+      "This blocks new sessions and refreshes, and disconnects the board sessions opened with this token.",
     );
   }
   notify("This action is unavailable.", true);

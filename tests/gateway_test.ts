@@ -2,8 +2,10 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { MCPClient } from "@mcp-use/client";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { BoardStore } from "../src/domain/board.ts";
 import { AuthService } from "../src/auth/service.ts";
+import { issueAccessToken } from "../src/auth/access-tokens.ts";
 import { createApp } from "../src/app.ts";
 import type { createHttpGateway as GatewayFactory } from "../src/gateway/http.ts";
 
@@ -334,6 +336,76 @@ Deno.test({
     } finally {
       await a.close();
       await b.close();
+      await gateway.close();
+      await gatewayHttp.shutdown();
+      await backend.close();
+      await http.shutdown();
+      store.close();
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+Deno.test({
+  name: "HTTP gateway re-presents its installation token on refresh",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const dir = await Deno.makeTempDir({
+      prefix: "agent-chat-gateway-refresh-",
+    });
+    const store = await BoardStore.open(join(dir, "board.kv"));
+    const auth = new AuthService(store, {
+      secret: "gateway-refresh-secret-at-least-32-characters",
+      ttlSeconds: 60,
+      requireGateway: true,
+    });
+    const backend = createApp({ store, auth });
+    let refreshes = 0;
+    const http = Deno.serve(
+      { hostname: "127.0.0.1", port: 0, onListen() {} },
+      async (request) => {
+        const response = await backend.app.fetch(request);
+        if (new URL(request.url).pathname === "/auth/refresh" && response.ok) {
+          refreshes++;
+        }
+        return response;
+      },
+    );
+    const url = "http://127.0.0.1:" + http.addr.port;
+    const copiedHttp = join(dir, "http.ts");
+    await Deno.copyFile(new URL("../http.ts", import.meta.url), copiedHttp);
+    const { createHttpGateway } = await import(
+      pathToFileURL(copiedHttp).href
+    ) as { createHttpGateway: typeof GatewayFactory };
+    const access = await issueAccessToken(auth, "gateway-refresh");
+    const gateway = createHttpGateway({ url, gatewayToken: access.token });
+    const gatewayHttp = Deno.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      onListen() {},
+    }, gateway.app.fetch);
+    const client = MCPClient.fromDict({
+      mcpServers: {
+        board: {
+          url: "http://127.0.0.1:" + gatewayHttp.addr.port + "/mcp",
+          oauth: false,
+        },
+      },
+    });
+    try {
+      const connection = await client.connect("board");
+      assert((await connection.listTools()).some((t) => t.name === "auth"));
+      await delay(31_000);
+      assert(
+        refreshes > 0,
+        "the gateway must complete a refresh through the backend",
+      );
+      assert(
+        (await connection.listTools()).some((t) => t.name === "auth"),
+        "the gateway must keep working after refreshing with its installation token",
+      );
+    } finally {
+      await client.close();
       await gateway.close();
       await gatewayHttp.shutdown();
       await backend.close();

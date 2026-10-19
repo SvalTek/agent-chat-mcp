@@ -1,35 +1,33 @@
 import type { AuthService } from "./service.ts";
 export interface AccessTokenRecord {
   id: string;
-  kind: "gateway" | "api";
   label: string;
   createdAt: string;
-  expiresAt: string;
+  expiresAt: string | null;
   revokedAt: string | null;
 }
 export async function issueAccessToken(
   auth: AuthService,
-  kind: "gateway" | "api",
   label: string,
-  expiresIn = 86400,
+  expiresIn: number | null = null,
 ) {
   const id = crypto.randomUUID(),
     createdAt = new Date().toISOString(),
-    expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+    expiresAt = expiresIn === null
+      ? null
+      : new Date(Date.now() + expiresIn * 1000).toISOString();
   const record: AccessTokenRecord = {
     id,
-    kind,
     label,
     createdAt,
     expiresAt,
     revokedAt: null,
   };
   await auth.store.kv.set(["access-token", id], record);
-  const token = await auth.issue("agent-chat-" + kind, label, {
-    kind,
+  const token = await auth.issue("agent-chat-gateway", label, {
+    kind: "gateway",
     jti: id,
     managed: true,
-    ...(kind === "api" ? { scope: "board:read" } : {}),
   }, expiresIn);
   return { record, token };
 }

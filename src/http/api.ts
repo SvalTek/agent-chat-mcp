@@ -1,12 +1,17 @@
 import { Hono } from "hono";
 import { z } from "zod";
-import { type AgentPrincipal, AuthService, bearer } from "../auth/service.ts";
+import {
+  type AgentPrincipal,
+  AuthService,
+  bearer,
+  StaleGatewayCredential,
+} from "../auth/service.ts";
 import { Integrations } from "../auth/integrations.ts";
 import type { BoardStore } from "../domain/board.ts";
 import { pageOptions } from "./query.ts";
 import { recordLog } from "../infra/logs.ts";
 import { agentCredentials } from "../auth/credentials.ts";
-type ApiEnv = { Variables: { principal: AgentPrincipal | null } };
+type ApiEnv = { Variables: { principal: AgentPrincipal } };
 export function createApi(
   store: BoardStore,
   auth: AuthService,
@@ -90,7 +95,19 @@ export function createApi(
         auth.sessions.get(principal.sessionId),
       );
       return c.json(data);
-    } catch {
+    } catch (error) {
+      if (error instanceof StaleGatewayCredential) {
+        recordLog(
+          "warn",
+          "auth",
+          "Agent authentication rejected: installation credential expired or revoked.",
+          principal,
+        );
+        return c.json({
+          error:
+            "Installation credential expired or revoked. Reconnect the gateway with a valid token.",
+        }, 401);
+      }
       recordLog(
         "warn",
         "auth",
@@ -116,10 +133,20 @@ export function createApi(
   });
   app.post("/auth/refresh", async (c) => {
     try {
+      const principal = await auth.verifyAgent(bearer(c.req.raw));
       return c.json(
-        await auth.refresh(await auth.verifyAgent(bearer(c.req.raw))),
+        await auth.refresh(
+          principal,
+          c.req.header("x-agent-chat-gateway-token"),
+        ),
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof StaleGatewayCredential) {
+        return c.json({
+          error:
+            "Installation credential required, expired, or revoked. Reconnect the gateway with a valid token.",
+        }, 401);
+      }
       return c.json({
         error: "Session expired; reconnect and authenticate again.",
       }, 401);
@@ -140,32 +167,14 @@ export function createApi(
       if (header.startsWith("Basic ")) {
         c.set("principal", (await integrations.request(c.req.raw)).principal);
       } else {
-        const token = bearer(c.req.raw);
-        try {
-          c.set("principal", await auth.verifyAgent(token));
-        } catch {
-          const claims = await auth.verifyPurpose(token, "agent-chat-api");
-          if (
-            claims.kind !== "api" ||
-            !String(claims.scope ?? "").split(" ").includes("board:read")
-          ) return c.json({ error: "board:read scope required." }, 403);
-          c.set("principal", null);
-        }
+        c.set("principal", await auth.verifyAgent(bearer(c.req.raw)));
       }
     } catch {
       return c.json({ error: "Invalid API credentials." }, 401);
     }
-    if (!["GET", "HEAD"].includes(c.req.method) && !c.get("principal")) {
-      return c.json({
-        error: "User integration credentials required for writes.",
-      }, 403);
-    }
     await next();
   });
-  const identity = (principal: AgentPrincipal | null) =>
-    principal
-      ? auth.identity(principal)
-      : { id: "api", accountId: null, lastMessageId: null };
+  const identity = (principal: AgentPrincipal) => auth.identity(principal);
   app.get(
     "/api/v1/categories",
     async (c) =>
@@ -227,9 +236,7 @@ export function createApi(
   });
   app.get("/api/v1/threads/:id", async (c) => {
     const thread = await store.getThread(c.req.param("id"));
-    if (!thread || (!c.get("principal") && thread.kind !== "public")) {
-      return c.json({ error: "Conversation not found." }, 404);
-    }
+    if (!thread) return c.json({ error: "Conversation not found." }, 404);
     return c.json(
       await store.listMessages(
         identity(c.get("principal")),

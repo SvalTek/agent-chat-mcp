@@ -1,6 +1,10 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "node:path";
-import { BoardStore, type SessionIdentity } from "../src/domain/board.ts";
+import {
+  BoardStore,
+  type Category,
+  type SessionIdentity,
+} from "../src/domain/board.ts";
 import { backfillFeed } from "../src/domain/feed.ts";
 import { getLogs } from "../src/infra/logs.ts";
 
@@ -1042,6 +1046,110 @@ Deno.test("an inflated follower counter cannot burn a follower slot", async () =
       "the follower index decides the total",
     );
     assertEquals(await countKeyPrefix(store.kv, ["thread-follower"]), 2);
+  });
+});
+
+Deno.test("a reply rebuilds its follower snapshot when the index moves", async () => {
+  await withStore(async (store) => {
+    const author = session("snapshot-author");
+    const peer = session("snapshot-peer");
+    const follower = session("snapshot-follower");
+    await store.authenticate(author, "snapshot_author", password);
+    await store.authenticate(peer, "snapshot_peer", password);
+    await store.authenticate(follower, "snapshot_follower", password);
+    const category = await store.createCategory(author, "Snapshot");
+    const thread = await store.postThread(author, category.id, "Thread");
+    await store.followThread(follower, thread.thread.id);
+
+    // The first commit loses, which is what a follower change during the scan
+    // looks like to the guarded commit.
+    const original = store.kv.atomic.bind(store.kv);
+    let failures = 1;
+    store.kv.atomic = () => {
+      const op = original();
+      const commit = op.commit.bind(op);
+      op.commit = () =>
+        failures-- > 0 ? Promise.resolve({ ok: false }) : commit();
+      return op;
+    };
+    let reply: { id: string };
+    try {
+      reply = await store.reply(peer, thread.thread.id, "Notified anyway");
+    } finally {
+      store.kv.atomic = original;
+    }
+
+    // The retry published the message exactly once and still notified the
+    // follower the rebuilt snapshot found.
+    const messages = await store.listMessages(peer, thread.thread.id);
+    assertEquals(messages.items.map((item) => item.text), [
+      "Thread",
+      "Notified anyway",
+    ]);
+    const inbox = await store.listInbox(follower);
+    assertEquals(inbox.items.map((item) => item.kind), ["reply"]);
+    assertEquals(inbox.items[0].messageId, reply.id);
+  });
+});
+
+Deno.test("a guarded reply retries even when no inbox entry is written", async () => {
+  await withStore(async (store) => {
+    const author = session("lonely-author");
+    await store.authenticate(author, "lonely_author", password);
+    const category = await store.createCategory(author, "Lonely");
+    const thread = await store.postThread(author, category.id, "Thread");
+
+    const original = store.kv.atomic.bind(store.kv);
+    let failures = 1;
+    store.kv.atomic = () => {
+      const op = original();
+      const commit = op.commit.bind(op);
+      op.commit = () =>
+        failures-- > 0 ? Promise.resolve({ ok: false }) : commit();
+      return op;
+    };
+    let reply: { text: string };
+    try {
+      // The author is the only follower and mentions nobody, so the commit
+      // checks the follower index while writing no inbox entry at all.
+      reply = await store.reply(author, thread.thread.id, "Self reply");
+    } finally {
+      store.kv.atomic = original;
+    }
+    assertEquals(reply.text, "Self reply");
+    assertEquals(
+      (await store.listMessages(author, thread.thread.id)).items.map((item) =>
+        item.text
+      ),
+      ["Thread", "Self reply"],
+    );
+  });
+});
+
+Deno.test("an idempotent replay respects a deleted category", async () => {
+  await withStore(async (store) => {
+    const author = session("replay-author");
+    await store.authenticate(author, "replay_author", password);
+    const category = await store.createCategory(author, "Replay");
+    await store.postThread(author, category.id, "Replayed later", {
+      idempotencyKey: "replay-1",
+    });
+    const entry = (await store.kv.get<Category>(["category", category.id]))
+      .value!;
+    await store.kv.set(["category", category.id], {
+      ...entry,
+      deletedAt: new Date().toISOString(),
+    });
+    // The replay resolves through the same visibility as every reader, so a
+    // deleted category hides the write it would otherwise resurrect.
+    await assertRejects(
+      () =>
+        store.postThread(author, category.id, "Replayed later", {
+          idempotencyKey: "replay-1",
+        }),
+      Error,
+      "no longer available",
+    );
   });
 });
 

@@ -181,7 +181,6 @@ export class Messages {
         categoryId,
       } satisfies FeedEntry,
     );
-    // The author follows the thread they started, so later replies reach them.
     if (idempotency) {
       this.recordIdempotentWrite(op, idempotency, { messageId, threadId });
     }
@@ -195,6 +194,12 @@ export class Messages {
     }
     session.lastMessageId = messageId;
     const recipientIds = mentions.map((account) => account.id);
+    // The author follows the thread they started, so later replies reach them.
+    // Installed before the change is announced: a peer reacting to the event
+    // must not be able to reply into a thread its author does not follow yet.
+    if (session.accountId) {
+      await this.follows.autoFollow(threadId, session.accountId);
+    }
     this.events.publish({
       publicUris: [
         "agent-chat://categories",
@@ -206,10 +211,6 @@ export class Messages {
         recipientIds.map((id) => [id, ["agent-chat://inbox/me"]]),
       ),
     });
-    // The author follows the thread they started, so later replies reach them.
-    if (session.accountId) {
-      await this.follows.autoFollow(threadId, session.accountId);
-    }
     return { thread, message };
   }
 
@@ -288,50 +289,67 @@ export class Messages {
       createdAt: now,
       editedAt: null,
     };
-    const followerIds = await this.follows.followerIds(threadId);
-    const op = this.kv.atomic()
-      .check(threadEntry, categoryEntry)
-      .set(["message", messageId], message)
-      .set(
-        ["thread-message", threadId, this.kv.commitVersionstamp()],
-        messageId,
-      );
-    if (session.accountId === null) {
-      op.set(["session-last-message", session.id], messageId);
-    }
-    const recipients = new Set(mentions.map((account) => account.id));
-    for (const account of mentions) {
-      op.set(["inbox", account.id, this.kv.commitVersionstamp()], {
-        messageId,
-        threadId,
-        kind: "mention",
-      });
-    }
-    // A mentioned follower is notified once, as a mention, not again as a reply.
-    for (const accountId of followerIds) {
-      if (accountId === session.accountId || recipients.has(accountId)) {
-        continue;
+    // The notification set is only correct for the follower index this commit
+    // observed, so the same commit verifies that index has not moved; a lost
+    // race rebuilds the page from a fresh snapshot rather than dropping a
+    // notification or sending one to an account that has just unfollowed.
+    const commitReply = async () => {
+      const snapshot = await this.follows.followerSnapshot(threadId);
+      const op = this.kv.atomic()
+        .check(threadEntry, categoryEntry)
+        .set(["message", messageId], message)
+        .set(
+          ["thread-message", threadId, this.kv.commitVersionstamp()],
+          messageId,
+        );
+      if (session.accountId === null) {
+        op.set(["session-last-message", session.id], messageId);
       }
-      op.set(["inbox", accountId, this.kv.commitVersionstamp()], {
-        messageId,
-        threadId,
-        kind: "reply",
-      });
-      recipients.add(accountId);
+      const recipients = new Set(mentions.map((account) => account.id));
+      for (const account of mentions) {
+        op.set(["inbox", account.id, this.kv.commitVersionstamp()], {
+          messageId,
+          threadId,
+          kind: "mention",
+        });
+      }
+      // A mentioned follower is notified once, as a mention, not again as a reply.
+      for (const accountId of snapshot.accountIds) {
+        if (accountId === session.accountId || recipients.has(accountId)) {
+          continue;
+        }
+        op.set(["inbox", accountId, this.kv.commitVersionstamp()], {
+          messageId,
+          threadId,
+          kind: "reply",
+        });
+        recipients.add(accountId);
+      }
+      // Public messages enter the catch-up feed at their commit position.
+      op.set(
+        feedKey(this.kv.commitVersionstamp()),
+        {
+          messageId,
+          threadId,
+          categoryId: threadEntry.value.categoryId!,
+        } satisfies FeedEntry,
+      );
+      if (idempotency) {
+        this.recordIdempotentWrite(op, idempotency, { messageId, threadId });
+      }
+      const guarded = snapshot.accountIds.length > 0;
+      if (guarded) {
+        this.follows.guardFollowerSnapshot(op, threadId, snapshot);
+      }
+      return { result: await op.commit(), recipients, guarded };
+    };
+    let attempt = await commitReply();
+    // Only a commit that checked the follower index has a reason to retry; any
+    // other conflict would fail again on the same thread and category entries.
+    if (!attempt.result.ok && attempt.guarded) {
+      attempt = await commitReply();
     }
-    // Public messages enter the catch-up feed at their commit position.
-    op.set(
-      feedKey(this.kv.commitVersionstamp()),
-      {
-        messageId,
-        threadId,
-        categoryId: threadEntry.value.categoryId!,
-      } satisfies FeedEntry,
-    );
-    if (idempotency) {
-      this.recordIdempotentWrite(op, idempotency, { messageId, threadId });
-    }
-    const result = await op.commit();
+    const { result } = attempt;
     if (!result.ok) {
       if (idempotency) {
         const replay = await this.replayIdempotent(idempotency);
@@ -342,7 +360,13 @@ export class Messages {
       );
     }
     session.lastMessageId = messageId;
-    const recipientIds = [...recipients];
+    const recipientIds = [...attempt.recipients];
+    // Replying follows the thread before the change is announced, so a peer
+    // reacting to the event cannot reply into a thread the replier does not
+    // follow yet.
+    if (session.accountId) {
+      await this.follows.autoFollow(threadId, session.accountId);
+    }
     this.events.publish({
       publicUris: [
         "agent-chat://feed",
@@ -353,10 +377,6 @@ export class Messages {
         recipientIds.map((id) => [id, ["agent-chat://inbox/me"]]),
       ),
     });
-    // Replying follows the thread, so later replies reach the replier.
-    if (session.accountId) {
-      await this.follows.autoFollow(threadId, session.accountId);
-    }
     return message;
   }
 
@@ -889,8 +909,10 @@ export class Messages {
 
   /**
    * Returns the currently stored thread and message for a matching prior write,
-   * with its original created flag. Throws for a different payload digest or a
-   * missing/deleted thread or message; storage errors propagate.
+   * with its original created flag. Throws for a different payload digest, and
+   * for a thread or message its ordinary readers no longer expose — a deleted
+   * thread, a deleted message, or a thread whose category was deleted. Storage
+   * errors propagate.
    */
   private async completedIdempotentWrite(
     record: IdempotencyRecord,
@@ -901,11 +923,12 @@ export class Messages {
         "This idempotencyKey was already used for a different write; use a new key.",
       );
     }
-    const thread = (await this.kv.get<Thread>(["thread", record.threadId]))
-      .value;
-    const message = (await this.kv.get<Message>(["message", record.messageId]))
-      .value;
-    if (!thread || thread.deletedAt || !message || message.deletedAt) {
+    // The ordinary readers decide visibility, not this record: a thread whose
+    // category was deleted is hidden everywhere else, so a replay must not
+    // resurrect it.
+    const thread = await this.getThread(record.threadId);
+    const message = await this.getMessage(record.messageId);
+    if (!thread || !message) {
       throw new Error(
         "This idempotencyKey already completed a write whose message is no longer available.",
       );

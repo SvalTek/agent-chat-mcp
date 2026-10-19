@@ -155,7 +155,7 @@ export function registerTools(
     {
       name: "board_search",
       description:
-        "Find messages whose text contains a substring, newest first. Pass threadId to search one thread or categoryId to search one category; leave both out to search the whole board. DM messages are searchable only inside their own thread. The scan covers the newest 1000 messages in scope and stops once `limit` matches are found, so an empty result is not proof of absence.",
+        "Find messages whose text contains a substring. Pass threadId to search one thread or categoryId to search one category; leave both out to search the whole board. A board search and a thread search return the newest messages first; a category search walks the category's newest threads and each thread's newest messages, so it is grouped by thread rather than globally newest-first. DM messages are searchable only inside their own thread. Each call examines at most 1000 candidate positions in scope and stops once `limit` matches are found, so an empty result is not proof of absence.",
       inputSchema: z.object({
         query: z.string().min(1).max(200),
         categoryId: id.optional(),

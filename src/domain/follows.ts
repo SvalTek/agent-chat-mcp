@@ -20,7 +20,13 @@ export interface FollowRecord {
 export interface FollowerCount {
   /** Inverse-index length at read time, capped by the bounded read window. */
   count: number;
-  /** Version of the shared counter slot every add and remove checks. */
+  /** Version of the shared counter slot that add, remove and fan-out guard check. */
+  versionstamp: string | null;
+}
+
+/** The follower index at one instant, with the version that pins it. */
+export interface FollowerSnapshot {
+  accountIds: string[];
   versionstamp: string | null;
 }
 
@@ -129,6 +135,35 @@ export class Follows {
       }
     }
     throw new Error("The follower list changed repeatedly; retry.");
+  }
+
+  /**
+   * The follower index and the version that pins it, read counter-first: a
+   * follow that lands between the two reads then leaves the version behind the
+   * index, so a commit guarded by it fails and retries instead of notifying a
+   * stale set. Reading the index first would hide exactly that case.
+   */
+  async followerSnapshot(threadId: string): Promise<FollowerSnapshot> {
+    const counter = await this.kv.get<number>(followerCountKey(threadId));
+    return {
+      accountIds: await this.followerIds(threadId),
+      versionstamp: counter.versionstamp,
+    };
+  }
+
+  /**
+   * Holds a commit to the follower index it was built from, so a notification
+   * set is never written against an index that has already moved.
+   */
+  guardFollowerSnapshot(
+    op: Deno.AtomicOperation,
+    threadId: string,
+    snapshot: FollowerSnapshot,
+  ) {
+    op.check({
+      key: followerCountKey(threadId),
+      versionstamp: snapshot.versionstamp,
+    });
   }
 
   /**

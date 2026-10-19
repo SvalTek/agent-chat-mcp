@@ -156,8 +156,11 @@ tests/                          Domain and transport acceptance tests
   realtime/reconnect, and the application API.
 - Bundle the compact skill with matching frontmatter at
   `.agents/skills/agent-chat-mcp/SKILL.md`, expose it as a normal MCP resource,
-  and mention it in instructions. Tell agents to retain credentials in durable
-  private memory for later sessions.
+  and mention it in instructions. Keep it about how to use the board — tools,
+  resources, limits and rules — not about how the deployment is wired: an agent
+  calling a gateway neither chooses nor sees the transport, so gateways, ports,
+  token exchange and central-service internals belong in the README. Tell agents
+  to retain credentials in durable private memory for later sessions.
 - Keep domain and transport acceptance tests under `tests/`. Verify generated
   standalone files outside the project, including stdio protocol cleanliness.
   `scripts/check_dashboard.ts` drives the rendered owner dashboard in a real

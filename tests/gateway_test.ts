@@ -11,6 +11,16 @@ function value(result: { content?: unknown }) {
   const content = result.content as { type: string; text?: string }[];
   return JSON.parse(content.find((c) => c.type === "text")!.text!);
 }
+/** Joins the text blocks of a resource result, ignoring binary blocks. */
+function resourceText(result: { contents: unknown }) {
+  const contents = Array.isArray(result.contents) ? result.contents : [];
+  return contents.map((content) =>
+    content && typeof content === "object" && "text" in content &&
+      typeof content.text === "string"
+      ? content.text
+      : ""
+  ).join("");
+}
 const password = "correct horse battery staple";
 Deno.test({
   name:
@@ -77,16 +87,72 @@ Deno.test({
       );
       assert(category.id !== category2.id);
       const page = await alice.readResource("agent-chat://categories?limit=1");
-      const parsed = JSON.parse((page.contents[0] as { text: string }).text);
+      const parsed = JSON.parse(resourceText(page));
       assertEquals(parsed.items.length, 1);
       assert(parsed.nextCursor);
       const next = await alice.readResource(
         "agent-chat://categories?limit=1&cursor=" +
           encodeURIComponent(parsed.nextCursor),
       );
+      assertEquals(JSON.parse(resourceText(next)).items.length, 1);
+
+      // One idempotency key may cover one write per tool: retries replay, tools stay distinct.
+      const posted = value(
+        await alice.callTool("message_post", {
+          categoryId: category.id,
+          text: "Idempotent post",
+          idempotencyKey: "gateway-retry-1",
+        }),
+      );
+      const reposted = value(
+        await alice.callTool("message_post", {
+          categoryId: category.id,
+          text: "Idempotent post",
+          idempotencyKey: "gateway-retry-1",
+        }),
+      );
+      assertEquals(reposted.message.id, posted.message.id);
+      const replied = value(
+        await alice.callTool("message_reply", {
+          threadId: posted.thread.id,
+          text: "Idempotent reply",
+          idempotencyKey: "gateway-retry-1",
+        }),
+      );
+      const replayedReply = value(
+        await alice.callTool("message_reply", {
+          threadId: posted.thread.id,
+          text: "Idempotent reply",
+          idempotencyKey: "gateway-retry-1",
+        }),
+      );
+      assertEquals(replayedReply.id, replied.id);
       assertEquals(
-        JSON.parse((next.contents[0] as { text: string }).text).items.length,
-        1,
+        JSON.parse(
+          resourceText(
+            await alice.readResource(
+              "agent-chat://threads/" + posted.thread.id,
+            ),
+          ),
+        ).items.length,
+        2,
+      );
+      // Posting followed the thread; the follow tools round-trip through the adapter.
+      assertEquals(
+        value(
+          await alice.callTool("thread_follow", {
+            threadId: posted.thread.id,
+          }),
+        ).following,
+        true,
+      );
+      assertEquals(
+        value(
+          await alice.callTool("thread_unfollow", {
+            threadId: posted.thread.id,
+          }),
+        ).following,
+        false,
       );
 
       const updates: string[] = [];

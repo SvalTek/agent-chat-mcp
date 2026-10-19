@@ -10,9 +10,39 @@ import { requireAccount } from "./identity.ts";
 import { decodeCursor, listPage, pageLimit } from "../storage/pagination.ts";
 import { Accounts } from "./accounts.ts";
 import { readSettings } from "./settings.ts";
+import { Follows, MAX_THREAD_FOLLOWERS } from "./follows.ts";
+import { hex } from "../auth/passwords.ts";
 const MENTION_RE = /(?<![\w@])@([A-Za-z][A-Za-z0-9_-]{2,31})(?![A-Za-z0-9_-])/g;
 const MAX_MENTIONS = 20;
 const MAX_TEXT_LENGTH = 20000;
+
+/** Retry controls shared by the write tools that machine clients may repeat. */
+export interface WriteOptions {
+  /**
+   * Client-generated key identifying one logical write. Repeating a write with
+   * the same key returns the original result instead of writing again.
+   */
+  idempotencyKey?: string;
+}
+
+interface IdempotencyRecord {
+  digest: string;
+  messageId: string;
+  threadId: string;
+  created?: boolean;
+}
+
+interface IdempotencyClaim {
+  key: Deno.KvKey;
+  digest: string;
+  existing: IdempotencyRecord | null;
+}
+
+async function digestPayload(payload: unknown) {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  return hex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+}
+
 function validateText(value: string) {
   const text = value.trim();
   if (!text) throw new Error("Message text cannot be empty.");
@@ -32,12 +62,29 @@ export class Messages {
     readonly kv: Deno.Kv,
     readonly events: EventHub,
     readonly accounts: Accounts,
+    readonly follows: Follows,
   ) {}
   async postThread(
     session: SessionIdentity,
     categoryId: string,
     textInput: string,
+    options: WriteOptions = {},
   ) {
+    const idempotency = options.idempotencyKey
+      ? await this.claimIdempotency(
+        session,
+        "message_post",
+        options.idempotencyKey,
+        [categoryId, textInput],
+      )
+      : null;
+    if (idempotency && idempotency.existing) {
+      const replay = await this.completedIdempotentWrite(
+        idempotency.existing,
+        idempotency.digest,
+      );
+      return { thread: replay.thread, message: replay.message };
+    }
     if (
       !session.accountId &&
       !(await readSettings(this.kv)).anonymousPostingEnabled
@@ -96,8 +143,19 @@ export class Messages {
     if (session.accountId === null) {
       op.set(["session-last-message", session.id], messageId);
     }
+    // The author follows the thread they started, so later replies reach them.
+    if (session.accountId) {
+      this.follows.setFollower(op, threadId, session.accountId, now);
+    }
+    if (idempotency) {
+      this.recordIdempotentWrite(op, idempotency, { messageId, threadId });
+    }
     const result = await op.commit();
     if (!result.ok) {
+      if (idempotency) {
+        const replay = await this.replayIdempotent(idempotency);
+        if (replay) return { thread: replay.thread, message: replay.message };
+      }
       throw new Error("Category changed while posting; reload and retry.");
     }
     session.lastMessageId = messageId;
@@ -115,7 +173,27 @@ export class Messages {
     return { thread, message };
   }
 
-  async reply(session: SessionIdentity, threadId: string, textInput: string) {
+  async reply(
+    session: SessionIdentity,
+    threadId: string,
+    textInput: string,
+    options: WriteOptions = {},
+  ) {
+    const idempotency = options.idempotencyKey
+      ? await this.claimIdempotency(
+        session,
+        "message_reply",
+        options.idempotencyKey,
+        [threadId, textInput],
+      )
+      : null;
+    if (idempotency && idempotency.existing) {
+      const replay = await this.completedIdempotentWrite(
+        idempotency.existing,
+        idempotency.digest,
+      );
+      return replay.message;
+    }
     if (
       !session.accountId &&
       !(await readSettings(this.kv)).anonymousPostingEnabled
@@ -152,6 +230,7 @@ export class Messages {
       createdAt: now,
       editedAt: null,
     };
+    const followerIds = await this.follows.followerIds(threadId);
     const op = this.kv.atomic()
       .check(threadEntry, categoryEntry)
       .set(["message", messageId], message)
@@ -162,6 +241,7 @@ export class Messages {
     if (session.accountId === null) {
       op.set(["session-last-message", session.id], messageId);
     }
+    const recipients = new Set(mentions.map((account) => account.id));
     for (const account of mentions) {
       op.set(["inbox", account.id, this.kv.commitVersionstamp()], {
         messageId,
@@ -169,14 +249,40 @@ export class Messages {
         kind: "mention",
       });
     }
+    // A mentioned follower is notified once, as a mention, not again as a reply.
+    for (const accountId of followerIds) {
+      if (accountId === session.accountId || recipients.has(accountId)) {
+        continue;
+      }
+      op.set(["inbox", accountId, this.kv.commitVersionstamp()], {
+        messageId,
+        threadId,
+        kind: "reply",
+      });
+      recipients.add(accountId);
+    }
+    // Replying follows the thread, unless the follower index is already full.
+    if (
+      session.accountId && !followerIds.includes(session.accountId) &&
+      followerIds.length < MAX_THREAD_FOLLOWERS
+    ) {
+      this.follows.setFollower(op, threadId, session.accountId, now);
+    }
+    if (idempotency) {
+      this.recordIdempotentWrite(op, idempotency, { messageId, threadId });
+    }
     const result = await op.commit();
     if (!result.ok) {
+      if (idempotency) {
+        const replay = await this.replayIdempotent(idempotency);
+        if (replay) return replay.message;
+      }
       throw new Error(
         "Thread or category changed while replying; reload and retry.",
       );
     }
     session.lastMessageId = messageId;
-    const recipientIds = mentions.map((account) => account.id);
+    const recipientIds = [...recipients];
     this.events.publish({
       publicUris: [
         `agent-chat://threads/${threadId}`,
@@ -193,8 +299,28 @@ export class Messages {
     session: SessionIdentity,
     recipientName: string,
     textInput: string,
+    options: WriteOptions = {},
   ) {
     const senderId = requireAccount(session);
+    const idempotency = options.idempotencyKey
+      ? await this.claimIdempotency(
+        session,
+        "dm_send",
+        options.idempotencyKey,
+        [recipientName, textInput],
+      )
+      : null;
+    if (idempotency && idempotency.existing) {
+      const replay = await this.completedIdempotentWrite(
+        idempotency.existing,
+        idempotency.digest,
+      );
+      return {
+        threadId: replay.thread.id,
+        message: replay.message,
+        created: replay.created,
+      };
+    }
     const recipient = await this.accounts.resolveUsername(recipientName);
     if (!recipient) throw new Error("Recipient must be a registered username.");
     if (recipient.id === senderId) {
@@ -232,6 +358,13 @@ export class Messages {
           threadId: newId,
           kind: "dm",
         });
+      if (idempotency) {
+        this.recordIdempotentWrite(op, idempotency, {
+          messageId: message.id,
+          threadId: newId,
+          created: true,
+        });
+      }
       const result = await op.commit();
       if (result.ok) {
         threadId = newId;
@@ -249,13 +382,23 @@ export class Messages {
         });
         return { threadId, message, created };
       }
+      if (idempotency) {
+        const replay = await this.replayIdempotent(idempotency);
+        if (replay) {
+          return {
+            threadId: replay.thread.id,
+            message: replay.message,
+            created: replay.created,
+          };
+        }
+      }
       threadId = (await this.kv.get<string>(pairKey)).value;
     }
     if (!threadId) {
       throw new Error("Could not open the direct-message thread; retry.");
     }
     const message = await this.makeMessage(session, threadId, text, []);
-    const result = await this.kv.atomic()
+    const op = this.kv.atomic()
       .set(["message", message.id], message)
       .set(
         ["thread-message", threadId, this.kv.commitVersionstamp()],
@@ -265,9 +408,26 @@ export class Messages {
         messageId: message.id,
         threadId,
         kind: "dm",
-      })
-      .commit();
+      });
+    if (idempotency) {
+      this.recordIdempotentWrite(op, idempotency, {
+        messageId: message.id,
+        threadId,
+        created: false,
+      });
+    }
+    const result = await op.commit();
     if (!result.ok) {
+      if (idempotency) {
+        const replay = await this.replayIdempotent(idempotency);
+        if (replay) {
+          return {
+            threadId: replay.thread.id,
+            message: replay.message,
+            created: replay.created,
+          };
+        }
+      }
       throw new Error("Could not commit the direct message; retry.");
     }
     session.lastMessageId = message.id;
@@ -443,6 +603,75 @@ export class Messages {
       thread?.kind === "dm" && session.accountId &&
         thread.participants.includes(session.accountId),
     );
+  }
+
+  /**
+   * Prepares the idempotency record for a write. A key already used by this
+   * caller for a different payload is rejected instead of silently replacing
+   * the earlier write.
+   */
+  private async claimIdempotency(
+    session: SessionIdentity,
+    tool: string,
+    idempotencyKey: string,
+    payload: unknown,
+  ): Promise<IdempotencyClaim> {
+    const digest = await digestPayload(payload);
+    const key: Deno.KvKey = [
+      "idem",
+      session.accountId ?? `session:${session.id}`,
+      tool,
+      idempotencyKey,
+    ];
+    const record = (await this.kv.get<IdempotencyRecord>(key)).value;
+    if (record && record.digest !== digest) {
+      throw new Error(
+        "This idempotencyKey was already used for a different write; use a new key.",
+      );
+    }
+    return { key, digest, existing: record };
+  }
+
+  /** Adds the idempotency claim to the caller's open atomic commit. */
+  private recordIdempotentWrite(
+    op: Deno.AtomicOperation,
+    claim: IdempotencyClaim,
+    written: { messageId: string; threadId: string; created?: boolean },
+  ) {
+    const record: IdempotencyRecord = { digest: claim.digest, ...written };
+    op.check({ key: claim.key, versionstamp: null }).set(claim.key, record);
+  }
+
+  /**
+   * Re-reads a claim after a failed commit: a competing call with the same key
+   * may have won the race, in which case the caller replays its result.
+   */
+  private async replayIdempotent(claim: IdempotencyClaim) {
+    const record = (await this.kv.get<IdempotencyRecord>(claim.key)).value;
+    return record
+      ? await this.completedIdempotentWrite(record, claim.digest)
+      : null;
+  }
+
+  private async completedIdempotentWrite(
+    record: IdempotencyRecord,
+    digest: string,
+  ) {
+    if (record.digest !== digest) {
+      throw new Error(
+        "This idempotencyKey was already used for a different write; use a new key.",
+      );
+    }
+    const thread = (await this.kv.get<Thread>(["thread", record.threadId]))
+      .value;
+    const message = (await this.kv.get<Message>(["message", record.messageId]))
+      .value;
+    if (!thread || thread.deletedAt || !message || message.deletedAt) {
+      throw new Error(
+        "This idempotencyKey already completed a write whose message is no longer available.",
+      );
+    }
+    return { thread, message, created: record.created === true };
   }
 
   private async resolveMentions(text: string, senderAccountId: string | null) {

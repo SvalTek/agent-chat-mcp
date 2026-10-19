@@ -26,6 +26,15 @@ export function decodeCursor<T>(
 export function pageLimit(limit: number | undefined) {
   return Math.min(Math.max(Math.floor(limit ?? 30), 1), 100);
 }
+/**
+ * Resolves a page in KV key order, reversed when requested, skipping null
+ * results. cursor is the raw KV position decoded by the caller; scope labels
+ * the encoded nextCursor returned here. limit is the caller-normalized page size.
+ *
+ * Resolves at most limit * 4 + 32 entries per call. A short or empty page can
+ * still have a nextCursor; null marks exhaustion. Pages are not snapshots.
+ * Storage, resolver, and cursor-encoding errors propagate.
+ */
 export async function listPage<T>(
   kv: Deno.Kv,
   prefix: Deno.KvKey,

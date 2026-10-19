@@ -163,6 +163,10 @@ export class Conversations {
     if (thread) this.publish(thread);
     return { deleted: true };
   }
+  /**
+   * Signals public category, feed, and thread views for public conversations;
+   * signals participant DM and inbox views for private conversations.
+   */
   publish(thread: Thread) {
     this.store.events.publish({
       publicUris: thread.kind === "public"

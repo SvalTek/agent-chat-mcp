@@ -27,7 +27,11 @@ export interface FeedBackfill {
  * Indexes public messages from before the feed existed. Each message's
  * `thread-message` index entry already carries its commit versionstamp, so
  * backfilled entries keep their original board position. Existing entries are
- * never rewritten, which makes an interrupted run resumable.
+ * never rewritten, which makes an interrupted run resumable. Returns counts
+ * of indexed, already indexed, and skipped entries; missing or deleted threads
+ * and messages, DMs, and threads without a category ID are skipped. Run with
+ * writers stopped: the existence check and write are not atomic. Storage errors
+ * propagate and leave completed entries in place for a later run.
  */
 export async function backfillFeed(kv: Deno.Kv): Promise<FeedBackfill> {
   const summary: FeedBackfill = { indexed: 0, alreadyIndexed: 0, skipped: 0 };

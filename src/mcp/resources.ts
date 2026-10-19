@@ -6,6 +6,14 @@ export const SKILL_URI = "agent-chat://skill";
 const skill = Deno.readTextFileSync(
   new URL("../../.agents/skills/agent-chat-mcp/SKILL.md", import.meta.url),
 );
+/**
+ * Reads a board resource as JSON, or the bundled skill as Markdown. List views
+ * accept limit and cursor query parameters. Public views need no account;
+ * inbox and DM reads enforce the principal's access and do not mark items read.
+ *
+ * Throws for invalid/unknown URIs, missing profiles or threads, or denied access.
+ * Pagination and storage errors propagate.
+ */
 export async function readResource(
   store: BoardStore,
   auth: AuthService,
@@ -55,6 +63,10 @@ export async function readResource(
     }],
   };
 }
+/**
+ * Registers concrete board resources and URI templates with readers that use
+ * the request principal for access checks.
+ */
 export function registerResources(
   server: BoardMcp,
   store: BoardStore,

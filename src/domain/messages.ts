@@ -76,6 +76,23 @@ export class Messages {
     readonly accounts: Accounts,
     readonly follows: Follows,
   ) {}
+  /**
+   * Creates a public thread and its first message, returning both records.
+   * Trims text, adds the message to the feed, notifies resolved mentions, and
+   * updates the session's latest message. Account authors are auto-followed on
+   * a best-effort basis; follower failures do not fail a committed post.
+   *
+   * A nonempty idempotency key is scoped to the account (or anonymous session)
+   * and this operation. Matching retries return the stored records, including
+   * later edits, without repeating side effects. The category ID and untrimmed
+   * text must match the original inputs exactly.
+   *
+   * @throws {Error} For disabled anonymous posting, a missing/deleted or archived
+   * category, empty text, text over 20,000 UTF-16 code units or 48,000 UTF-8 bytes,
+   * over 20 distinct mention names, or a concurrent category change. Key reuse
+   * with different inputs or an unavailable replay record also throws. Storage,
+   * mention lookup, and digest errors propagate.
+   */
   async postThread(
     session: SessionIdentity,
     categoryId: string,
@@ -196,6 +213,24 @@ export class Messages {
     return { thread, message };
   }
 
+  /**
+   * Appends and returns a public reply, indexing it in the feed and updating
+   * the session's latest message. Mentions and followers other than the sender
+   * receive inbox entries; a mentioned follower receives only a mention entry.
+   * Account senders are auto-followed on a best-effort basis after the commit.
+   *
+   * A nonempty idempotency key is scoped to this operation and the account or
+   * anonymous session. Matching retries return the stored message, including
+   * later edits, without repeating notifications or auto-following. The thread
+   * ID and untrimmed text must match the original inputs exactly.
+   *
+   * @throws {Error} For disabled anonymous posting, missing/deleted threads or
+   * categories, private threads, archived categories, empty text, text over
+   * 20,000 UTF-16 code units or 48,000 UTF-8 bytes, over 20 distinct mention names,
+   * or concurrent thread/category changes. Conflicting key reuse or unavailable
+   * replay records throw. Storage, mention lookup, and digest errors propagate;
+   * auto-follow errors are caught.
+   */
   async reply(
     session: SessionIdentity,
     threadId: string,
@@ -325,6 +360,21 @@ export class Messages {
     return message;
   }
 
+  /**
+   * Sends a private message to a registered username in the account pair's
+   * shared thread. Returns its threadId, message, and whether this write created
+   * the thread. Notifies the recipient and updates the session's latest message;
+   * DMs do not enter the public feed or resolve mentions.
+   *
+   * A nonempty idempotency key is scoped to the sender account and this operation.
+   * An exact retry of the recipient name and untrimmed text returns the stored
+   * message (including later edits) and original created flag without sending again.
+   *
+   * @throws {Error} If unauthenticated, the recipient is unknown or is the sender,
+   * trimmed text is empty or exceeds 20,000 UTF-16 code units or 48,000 UTF-8 bytes,
+   * or opening/committing the conversation fails. Conflicting key reuse and
+   * unavailable replay records throw. Storage, lookup, and digest errors propagate.
+   */
   async sendDm(
     session: SessionIdentity,
     recipientName: string,
@@ -474,6 +524,17 @@ export class Messages {
     return { threadId, message, created };
   }
 
+  /**
+   * Replaces and returns an owned message's trimmed text and edited timestamp.
+   * Anonymous sessions may edit only their latest stored message. Public edits
+   * recompute mentions and notify newly mentioned accounts; DM mentions stay
+   * unchanged. Publishes affected thread, inbox, and public feed updates.
+   *
+   * @throws {Error} For missing/deleted messages, ownership violations, archived
+   * categories, empty text, text over 20,000 UTF-16 code units or 48,000 UTF-8 bytes,
+   * over 20 distinct public mention names, or a concurrent change. Storage and
+   * mention lookup errors propagate, including reads after the edit commits.
+   */
   async editMessage(
     session: SessionIdentity,
     messageId: string,
@@ -633,7 +694,10 @@ export class Messages {
   /**
    * Public messages in board order, newest first, resolved against their
    * current text. Deleted messages drop out. Private messages are never
-   * indexed, so opening a DM thread is what recovers missed DMs.
+   * indexed, so opening a DM thread is what recovers missed DMs. The limit
+   * defaults to 30 and is floored and clamped to 1–100. Continue with nextCursor
+   * until null, even after an empty page; reads are bounded and not snapshots.
+   * Invalid or differently scoped cursors and storage errors propagate.
    */
   async listFeed(options: { cursor?: string; limit?: number } = {}) {
     const scope = "feed";
@@ -654,12 +718,20 @@ export class Messages {
   }
 
   /**
-   * Substring search over a bounded window of message text. Candidates are
-   * examined newest first — the board's feed index for board and category
-   * scopes, the thread's own index for a thread scope — and the scan stops
-   * after `SEARCH_SCAN_LIMIT` candidate positions or as soon as `limit` matches
-   * are found, so matches come back newest first without ranking. DM traffic is
-   * reachable only inside its own thread.
+   * Searches current text for a trimmed, case-insensitive substring. Board
+   * scope uses the feed newest first; thread scope uses newest messages first.
+   * Category scope visits newest-created threads first, then each thread's
+   * messages newest first, so it does not give global message-recency order.
+   * DMs are searchable only by participants within their own thread.
+   *
+   * Stops after 1000 candidate positions or the match limit (default 30,
+   * floored and clamped to 1–100). Returns the trimmed query, hits, scanned
+   * count (including missing/deleted messages), scanLimit, and truncated.
+   * truncated is true only when another candidate exceeds the scan budget;
+   * false does not imply exhaustion when the match limit stopped the scan.
+   *
+   * @throws {Error} For an empty query, simultaneous category and thread
+   * filters, unavailable scopes, or denied DM access. Storage errors propagate.
    */
   async search(
     session: SessionIdentity,
@@ -815,6 +887,11 @@ export class Messages {
       : null;
   }
 
+  /**
+   * Returns the currently stored thread and message for a matching prior write,
+   * with its original created flag. Throws for a different payload digest or a
+   * missing/deleted thread or message; storage errors propagate.
+   */
   private async completedIdempotentWrite(
     record: IdempotencyRecord,
     digest: string,

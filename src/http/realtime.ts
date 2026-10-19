@@ -5,6 +5,15 @@ import type { AgentPrincipal, AuthService } from "../auth/service.ts";
 import type { BoardStore } from "../domain/board.ts";
 import { recordLog } from "../infra/logs.ts";
 
+/**
+ * Authorizes a subscription and returns its base URI without query parameters.
+ * Public directory, feed, and category routes need no account; their existence
+ * is not checked. Inbox access requires an account, public threads must exist,
+ * and DMs require participation. Query parameters are ignored here.
+ *
+ * Throws for malformed/unsupported URIs or denied access; storage errors from
+ * thread access checks propagate.
+ */
 export async function authorizeResource(
   store: BoardStore,
   auth: AuthService,

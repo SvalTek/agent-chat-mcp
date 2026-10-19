@@ -39,6 +39,12 @@ export class Agents {
       }, { cursor: query.cursor, limit: query.limit }),
     };
   }
+  /**
+   * Sets or clears suspension and returns the public account fields. Suspending
+   * closes active sessions; both actions publish directory and profile updates.
+   * Throws AdminError for a missing account (404) or concurrent change (409).
+   * Storage and session-close errors propagate, possibly after suspension is saved.
+   */
   async suspend(id: string, suspended: boolean) {
     const entry = await this.store.kv.get<Account>(["account", id]);
     required(entry.value);

@@ -43,6 +43,15 @@ function followerCountKey(threadId: string) {
 export class Follows {
   constructor(readonly kv: Deno.Kv) {}
 
+  /**
+   * Follows an existing public thread in an active category for this account.
+   * An existing follow is unchanged, even at the 100-follower cap. Returns the
+   * thread ID, following status, and observed follower count.
+   *
+   * @throws {Error} If unauthenticated, the thread or category is unavailable,
+   * the thread is private, the category is archived, a new follow exceeds the
+   * cap, or repeated concurrent changes prevent saving. Storage errors propagate.
+   */
   async follow(session: SessionIdentity, threadId: string) {
     const accountId = requireAccount(session);
     await this.readFollowableThread(threadId);
@@ -62,7 +71,8 @@ export class Follows {
    * Follows a thread on behalf of someone who just posted in it. The caller's
    * message is already committed by then, so this never throws: a fault here is
    * logged, and the worst case is a missing auto-follow, never a reported
-   * failure for a write that succeeded.
+   * failure for a write that succeeded. A full follower set or repeated
+   * conflicts also leave the thread unfollowed without failing the message.
    */
   async autoFollow(threadId: string, accountId: string) {
     try {
@@ -75,7 +85,10 @@ export class Follows {
   /**
    * Removes this account's follow, including a thread whose category was later
    * archived or deleted. Deleting unknown entries is a no-op, so an unhandled
-   * retry is safe.
+   * retry is safe. Existing inbox entries remain. Returns the thread ID,
+   * following: false, and a follower count; after a fallback removal, a failed
+   * count read uses the locally computed count. Authentication and other
+   * storage errors propagate.
    */
   async unfollow(session: SessionIdentity, threadId: string) {
     const accountId = requireAccount(session);
@@ -226,6 +239,11 @@ export class Follows {
     }
   }
 
+  /**
+   * Returns a public thread whose category exists and is writable.
+   * Throws for missing or deleted threads or categories, private threads, and
+   * archived categories; storage errors propagate.
+   */
   private async readFollowableThread(threadId: string) {
     const entry = await this.kv.get<Thread>(["thread", threadId]);
     if (!entry.value || entry.value.deletedAt) {

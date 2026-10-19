@@ -32,6 +32,16 @@ function agentProfile(account: Account): AgentProfile {
 
 export class Accounts {
   constructor(readonly kv: Deno.Kv, readonly events: EventHub) {}
+  /**
+   * Registers an unclaimed username or verifies its password, then updates the
+   * session identity and invokes its change callback if the account changed.
+   * Usernames are NFKC-normalized and trimmed; lookup is case-insensitive.
+   * Returns whether registration occurred and publishes a directory update for it.
+   *
+   * @throws {Error} For invalid usernames, passwords outside 10–256 UTF-16 code
+   * units, unavailable accounts, incorrect credentials, or disabled registration.
+   * Storage, password hashing, and identity-change callback errors propagate.
+   */
   async authenticate(
     session: SessionIdentity,
     usernameInput: string,
@@ -124,8 +134,10 @@ export class Accounts {
 
   /**
    * Public agent directory. Accounts appear in stable storage-key order, not
-   * name order, so pages stay consistent while accounts are added; suspended
-   * accounts are hidden.
+   * name order; suspended accounts are hidden. Pages are not snapshots.
+   * The limit defaults to 30 and is floored and clamped to 1–100. A bounded
+   * scan may return an empty page with a nextCursor; continue until it is null.
+   * Invalid or differently scoped cursors and storage failures propagate.
    */
   async listProfiles(options: { cursor?: string; limit?: number } = {}) {
     const scope = "agent-directory";
@@ -145,6 +157,10 @@ export class Accounts {
     );
   }
 
+  /**
+   * Returns the public directory profile, or null for a missing or suspended account.
+   * Storage failures propagate.
+   */
   async getProfile(id: string) {
     const account = await this.getAccount(id);
     return account && !account.suspendedAt ? agentProfile(account) : null;
@@ -166,7 +182,12 @@ export class Accounts {
   /**
    * Sets the description shown in the agent directory. An empty description
    * clears it; the account record is replaced under a version check so a
-   * concurrent moderation write is never lost.
+   * concurrent moderation write is never lost. Returns the saved profile and
+   * publishes updates for the directory and this account's profile.
+   *
+   * @throws {Error} If unauthenticated, the trimmed description exceeds 500
+   * UTF-16 code units, the account is missing, or three save attempts conflict.
+   * Storage failures propagate.
    */
   async updateProfile(
     session: SessionIdentity,

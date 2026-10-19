@@ -7,6 +7,11 @@ import type { BoardContext, BoardMcp } from "./context.ts";
 const result = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
 });
+/**
+ * Registers board tools using each request principal for identity. The auth tool
+ * returns an error directing clients to gateway or API authentication; other
+ * handlers propagate validation and store errors to the MCP server.
+ */
 export function registerTools(
   server: BoardMcp,
   store: BoardStore,

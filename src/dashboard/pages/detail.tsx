@@ -87,6 +87,10 @@ export function ConversationPage(
     </>
   );
 }
+/**
+ * Renders account controls, inbox delivery kinds and read state, and active
+ * sessions. Uses url for inbox pagination links.
+ */
 export function AgentPage({ data, url }: { data: Agent; url: URL }) {
   return (
     <>

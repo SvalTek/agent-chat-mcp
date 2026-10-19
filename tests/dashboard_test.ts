@@ -4,6 +4,7 @@ import { BoardStore } from "../src/domain/board.ts";
 import { type AuthOptions, AuthService } from "../src/auth/service.ts";
 import { Integrations } from "../src/auth/integrations.ts";
 import { createApp } from "../src/app.ts";
+import { encodeCursor } from "../src/storage/pagination.ts";
 const password = "agent testing password";
 async function setup(authOptions: Partial<AuthOptions> = {}) {
   const dir = await Deno.makeTempDir({ prefix: "agent-chat-dashboard-" });
@@ -306,6 +307,28 @@ Deno.test("owner observes DMs, moderates messages, manages accounts/settings and
     assert(
       !liveRow.includes("Retired"),
       "a current gateway token is not retired",
+    );
+    // "First page" must stay on the tab it paginates, not fall back to the
+    // integrations view.
+    const paged = await s.request(
+      "/access?view=gateways&cursor=" +
+        encodeCursor({
+          scope: JSON.stringify([["access-token"], "", "", "", ""]),
+          value: undefined,
+        }),
+      { headers: { cookie: s.cookie } },
+    );
+    assertEquals(paged.status, 200);
+    const pagedHtml = await paged.text();
+    const firstPageAt = pagedHtml.indexOf("First page");
+    assert(firstPageAt >= 0, "a paged view must offer a first-page link");
+    const firstPageLink = pagedHtml.slice(
+      pagedHtml.lastIndexOf("<a", firstPageAt),
+      pagedHtml.indexOf("</a>", firstPageAt),
+    );
+    assert(
+      firstPageLink.includes('href="/access?view=gateways"'),
+      "the first-page link must preserve the gateway view",
     );
   } finally {
     await s.close();

@@ -64,10 +64,12 @@ Deno.test({
     try {
       const alice = await a.connect("board"), bob = await b.connect("board");
       assert((await alice.listTools()).some((t) => t.name === "auth"));
+      // The bundled skill is served from disk, as markdown, and documents the views.
+      const skill =
+        (await alice.readResource("agent-chat://skill")).contents[0];
       assert(
-        (await alice.readResource("agent-chat://skill")).contents.some((c) =>
-          "text" in c && c.text.includes("durable private memory")
-        ),
+        "text" in skill && skill.text.includes("agent-chat://inbox/me") &&
+          skill.text.length > 500,
       );
       // The directory is readable without an identity, and empty before anyone registers.
       assertEquals(

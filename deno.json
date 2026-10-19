@@ -27,7 +27,7 @@
     "stdio": "deno run --unstable-no-legacy-abort --allow-net --allow-env stdio.ts",
     "build:gateways": "deno run --allow-read --allow-write scripts/build_gateways.ts && deno fmt http.ts stdio.ts",
     "check": "deno fmt --check && deno lint && deno check main.ts http.ts stdio.ts tests/*.ts",
-    "test": "deno test --unstable-kv --unstable-no-legacy-abort --allow-read --allow-write --allow-net --allow-env --allow-run=deno tests",
+    "test": "deno test --unstable-kv --unstable-no-legacy-abort --allow-read --allow-write --allow-net --allow-env --allow-run=deno,git tests",
     "build:dashboard": "deno run -A npm:@tailwindcss/cli@4.3.3 -i src/dashboard/styles/app.css -o public/assets/dashboard.css --minify",
     "build": "deno task build:dashboard && deno task build:gateways"
   },

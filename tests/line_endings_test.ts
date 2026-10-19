@@ -1,8 +1,9 @@
 import { assertEquals } from "@std/assert";
 import { join } from "node:path";
 
-// The normal test task permits only Deno subprocesses. Opt in to these Git
-// integration tests by also passing --allow-run=deno,git to `deno test`.
+// The test task permits Deno and Git subprocesses, so these run by default.
+// They self-skip when Git is not permitted, for example under a narrower
+// custom invocation.
 const canRunGit = Deno.permissions.querySync({
   name: "run",
   command: "git",

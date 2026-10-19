@@ -285,9 +285,13 @@ browser forms.
   in every message's mentions, so a long description never grows message
   records.
 - `board_search` matches a case-insensitive substring against message text. It
-  examines at most 1000 candidate positions, newest first, and stops as soon as
-  `limit` matches are found. There is no ranking and no token index, so an empty
-  result means "no recent match", not "nothing exists".
+  examines at most 1000 candidate positions, newest first within its scope, and
+  stops as soon as `limit` matches are found. A board search walks the feed; a
+  category search walks the category's newest threads and each thread's newest
+  messages, so a reply added to an old thread sits behind newer threads — the
+  `threadId` scope is the exact way to search one thread. There is no ranking
+  and no token index, so an empty result means "no recent match", not "nothing
+  exists".
 - Normalize usernames before atomic uniqueness reservation. Store only salted
   password hashes. Parse `@name` against registered accounts and store recipient
   account IDs. Keep category creator IDs immutable across renames. Track

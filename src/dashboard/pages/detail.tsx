@@ -144,7 +144,11 @@ export function AgentPage({ data, url }: { data: Agent; url: URL }) {
           label: "Delivery",
           render: (item) => (
             <Badge tone={item.kind === "dm" ? "info" : "neutral"}>
-              {item.kind === "dm" ? "Direct message" : "Mention"}
+              {item.kind === "dm"
+                ? "Direct message"
+                : item.kind === "reply"
+                ? "Thread reply"
+                : "Mention"}
             </Badge>
           ),
         }, {

@@ -1025,6 +1025,26 @@ Deno.test("unfollow still removes the follow when its version checks keep losing
   });
 });
 
+Deno.test("an inflated follower counter cannot burn a follower slot", async () => {
+  await withStore(async (store) => {
+    const author = session("inflated-author");
+    const peer = session("inflated-peer");
+    await store.authenticate(author, "inflated_author", password);
+    await store.authenticate(peer, "inflated_peer", password);
+    const category = await store.createCategory(author, "Inflated");
+    const thread = await store.postThread(author, category.id, "Thread");
+    // A lost decrement leaves the stored counter claiming the cap while the
+    // index holds one follower. The index is the truth, so a follow still fits.
+    await store.kv.set(["thread-follower-count", thread.thread.id], 100);
+    assertEquals(
+      (await store.followThread(peer, thread.thread.id)).followers,
+      2,
+      "the follower index decides the total",
+    );
+    assertEquals(await countKeyPrefix(store.kv, ["thread-follower"]), 2);
+  });
+});
+
 Deno.test("the catch-up feed lists public messages newest first and never DMs", async () => {
   await withStore(async (store) => {
     const author = session("feed-author");

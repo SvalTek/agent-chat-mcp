@@ -1,5 +1,6 @@
 import type { Category, SessionIdentity, Thread } from "./types.ts";
 import { requireAccount } from "./identity.ts";
+import { errorText, recordLog } from "../infra/logs.ts";
 
 /**
  * Upper bound on a thread's follower index. Reply notifications are written in
@@ -43,25 +44,30 @@ export class Follows {
   async follow(session: SessionIdentity, threadId: string) {
     const accountId = requireAccount(session);
     await this.readFollowableThread(threadId);
-    const outcome = await this.addFollower(threadId, accountId);
-    if (outcome === "full") {
+    const result = await this.addFollower(threadId, accountId);
+    if (result.outcome === "full") {
       throw new Error(
         `This thread already has the maximum of ${MAX_THREAD_FOLLOWERS} followers.`,
       );
     }
-    if (outcome === "conflict") {
+    if (result.outcome === "conflict") {
       throw new Error("The follower list changed repeatedly; retry.");
     }
-    return await this.followState(threadId, true);
+    return { threadId, following: true, followers: result.count };
   }
 
   /**
-   * Follows a thread on behalf of someone who just posted in it. Never throws
-   * for a full or contended thread: the caller's write has already committed,
-   * so bookkeeping must not turn into a failure it would have to report.
+   * Follows a thread on behalf of someone who just posted in it. The caller's
+   * message is already committed by then, so this never throws: a fault here is
+   * logged, and the worst case is a missing auto-follow, never a reported
+   * failure for a write that succeeded.
    */
   async autoFollow(threadId: string, accountId: string) {
-    await this.addFollower(threadId, accountId);
+    try {
+      await this.addFollower(threadId, accountId);
+    } catch (error) {
+      recordLog("warn", "follows:auto-follow", errorText(error));
+    }
   }
 
   /**
@@ -73,8 +79,11 @@ export class Follows {
     const accountId = requireAccount(session);
     const [forwardKey, reverseKey] = followKeys(accountId, threadId);
     for (let attempt = 0; attempt < 5; attempt++) {
-      if (!(await this.kv.get(forwardKey)).value) break;
       const counter = await this.followerCount(threadId);
+      if (!(await this.kv.get(forwardKey)).value) {
+        return { threadId, following: false, followers: counter.count };
+      }
+      const remaining = Math.max(counter.count - 1, 0);
       const op = this.kv.atomic()
         .check({
           key: followerCountKey(threadId),
@@ -83,15 +92,25 @@ export class Follows {
         .delete(forwardKey)
         .delete(reverseKey);
       if (counter.versionstamp !== null) {
-        op.set(followerCountKey(threadId), Math.max(counter.count - 1, 0));
+        op.set(followerCountKey(threadId), remaining);
       }
-      if ((await op.commit()).ok) break;
+      if ((await op.commit()).ok) {
+        return { threadId, following: false, followers: remaining };
+      }
       if (attempt === 4) {
-        // A counter left too high only makes the cap stricter, so removal wins.
-        await this.kv.atomic().delete(forwardKey).delete(reverseKey).commit();
+        // Removal wins over bookkeeping: an unchecked decrement cannot admit an
+        // over-cap follow, because the reported total never drops below the
+        // index length, and leaving the counter high would burn a follow slot
+        // on this thread for good.
+        await this.kv.atomic()
+          .delete(forwardKey)
+          .delete(reverseKey)
+          .set(followerCountKey(threadId), remaining)
+          .commit();
+        return { threadId, following: false, followers: remaining };
       }
     }
-    return await this.followState(threadId, false);
+    throw new Error("The follower list changed repeatedly; retry.");
   }
 
   /**
@@ -148,23 +167,28 @@ export class Follows {
       .set(followerCountKey(threadId), counter.count + 1);
   }
 
-  private async followState(threadId: string, following: boolean) {
-    return {
-      threadId,
-      following,
-      followers: (await this.followerCount(threadId)).count,
-    };
-  }
-
+  /**
+   * Adds a follow under the shared counter's version check, reporting the total
+   * it left behind so callers never need a read after their own write. Returns
+   * `full` without writing when the thread holds the cap, and `conflict` when
+   * the counter moved under every attempt.
+   */
   private async addFollower(
     threadId: string,
     accountId: string,
-  ): Promise<"added" | "already" | "full" | "conflict"> {
+  ): Promise<
+    { outcome: "added" | "already" | "full"; count: number } | {
+      outcome: "conflict";
+    }
+  > {
     const [forwardKey] = followKeys(accountId, threadId);
     for (let attempt = 0; attempt < 5; attempt++) {
-      if ((await this.kv.get(forwardKey)).value) return "already";
+      const follower = await this.kv.get(forwardKey);
       const counter = await this.followerCount(threadId);
-      if (counter.count >= MAX_THREAD_FOLLOWERS) return "full";
+      if (follower.value) return { outcome: "already", count: counter.count };
+      if (counter.count >= MAX_THREAD_FOLLOWERS) {
+        return { outcome: "full", count: counter.count };
+      }
       const op = this.kv.atomic().check({
         key: forwardKey,
         versionstamp: null,
@@ -176,9 +200,11 @@ export class Follows {
         new Date().toISOString(),
         counter,
       );
-      if ((await op.commit()).ok) return "added";
+      if ((await op.commit()).ok) {
+        return { outcome: "added", count: counter.count + 1 };
+      }
     }
-    return "conflict";
+    return { outcome: "conflict" };
   }
 
   private async readFollowableThread(threadId: string) {

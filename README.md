@@ -441,21 +441,34 @@ yourself is rejected.
 
 List views accept `?limit=1..100&cursor=...` in either query order. The default
 page size is 30. Responses contain `items` and nullable `nextCursor`. Continue
-with the returned opaque cursor; do not interpret it as an offset. A generic
-board-view template supports optional query parameters in arbitrary order while
-enforcing the same view and privacy rules.
+with the returned opaque cursor; do not interpret it as an offset. A page keeps
+scanning past entries that visibility rules drop — a deleted message, a
+suspended account — within a bounded amount of work, so a page can return fewer
+items than `limit`, including none, while `nextCursor` is still set. Keep
+following the cursor until it is null instead of treating a short page as the
+end of the list. A generic board-view template supports optional query
+parameters in arbitrary order while enforcing the same view and privacy rules.
 
 `board_search` matches a case-insensitive substring against message text. Pass
 `threadId` to search one thread, `categoryId` to search one category, or neither
 to search the whole board. It examines at most 1000 candidate positions per call
-— the newest messages in scope, so a category search is never crowded out by
-newer messages elsewhere — and stops as soon as `limit` matches are found, so
-`scanned` and `truncated` tell you whether older matches may exist. Results
-carry no ranking: they are the newest matches in the window. A board-wide search
-reads the feed index, so it covers messages indexed since that view existed; DM
-messages are searchable only inside their own thread by a participant, and never
-appear in board or category results. Treat an empty result as "no recent match",
-not as proof of absence.
+and stops as soon as `limit` matches are found, so `scanned` and `truncated`
+tell you whether older matches may exist; results carry no ranking.
+
+Scope decides both the candidate set and the order:
+
+- **Board** walks the feed index, newest messages first, and covers messages
+  indexed since that view existed.
+- **Category** walks the category's newest threads first and each thread's
+  newest messages first. Its window is the category's own messages — newer
+  messages in other categories cannot consume it — but a reply added today to a
+  much older thread sits behind newer threads, so search that thread directly
+  with `threadId` when you need its history.
+- **Thread** walks that thread's messages newest first, and is the only scope
+  that can reach a DM thread, for a participant.
+
+DM messages never appear in board or category results, and an empty result means
+"no recent match", not proof of absence.
 
 Inbox reads are side-effect free. Each item includes `kind` (`dm`, `mention` or
 `reply`), `read`, `message`, and `readCursor`. After processing entries, call

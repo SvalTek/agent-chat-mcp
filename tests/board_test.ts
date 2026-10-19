@@ -2,6 +2,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "node:path";
 import { BoardStore, type SessionIdentity } from "../src/domain/board.ts";
 import { backfillFeed } from "../src/domain/feed.ts";
+import { getLogs } from "../src/infra/logs.ts";
 
 async function withStore<T>(run: (store: BoardStore) => Promise<T>) {
   const directory = await Deno.makeTempDir({ prefix: "agent-chat-test-" });
@@ -878,6 +879,149 @@ Deno.test("public writes and profile changes publish the views they change", asy
     } finally {
       unsubscribe();
     }
+  });
+});
+
+Deno.test("paging stops at a scan budget and resumes past dropped entries", async () => {
+  await withStore(async (store) => {
+    const author = session("budget-author");
+    await store.authenticate(author, "budget_author", password);
+    const category = await store.createCategory(author, "Budget");
+    const thread = await store.postThread(
+      author,
+      category.id,
+      "Oldest live message",
+    );
+    // Feed entries newer than the live message, all pointing at message ids that
+    // do not exist, so every one of them resolves to null.
+    for (let start = 0; start < 100; start += 50) {
+      const op = store.kv.atomic();
+      for (let index = start; index < start + 50; index++) {
+        op.set(["feed", `dropped-${String(index).padStart(5, "0")}`], {
+          messageId: crypto.randomUUID(),
+          threadId: crypto.randomUUID(),
+          categoryId: category.id,
+        });
+      }
+      await op.commit();
+    }
+
+    const collected: string[] = [];
+    let cursor: string | null = null;
+    let pages = 0;
+    do {
+      const page = await store.listFeed({
+        limit: 1,
+        ...(cursor ? { cursor } : {}),
+      });
+      pages++;
+      collected.push(...page.items.map((item) => item.message.text));
+      cursor = page.nextCursor;
+      assert(pages <= 6, "one request must not scan the whole run");
+    } while (cursor);
+
+    assertEquals(collected, ["Oldest live message"]);
+    assert(pages >= 2, "the scan budget must split this run across requests");
+    assertEquals(
+      (await store.listFeed({ limit: 1 })).nextCursor !== null,
+      true,
+    );
+    // A single request is bounded too: an empty page with a cursor is expected,
+    // and walking the cursor is what reaches everything.
+    const seen: string[] = [];
+    let walk: string | null = null;
+    let walkPages = 0;
+    do {
+      const page = await store.listFeed({
+        limit: 10,
+        ...(walk ? { cursor: walk } : {}),
+      });
+      walkPages++;
+      seen.push(...page.items.map((item) => item.message.text));
+      walk = page.nextCursor;
+    } while (walk);
+    assertEquals(seen, ["Oldest live message"]);
+    assert(walkPages >= 2, "a bounded page may come back empty with a cursor");
+    assertEquals(thread.message.text, "Oldest live message");
+  });
+});
+
+Deno.test("a follower fault after a committed message is logged, not reported", async () => {
+  await withStore(async (store) => {
+    const author = session("resilient-author");
+    await store.authenticate(author, "resilient_author", password);
+    const category = await store.createCategory(author, "Resilient");
+    const original = store.kv.list.bind(store.kv);
+    store.kv.list = () => {
+      throw new Error("simulated list failure");
+    };
+    let started: { thread: { id: string }; message: { id: string } };
+    try {
+      // Auto-follow reads the follower index; the post must survive that fault.
+      started = await store.postThread(author, category.id, "Posted anyway");
+    } finally {
+      store.kv.list = original;
+    }
+    assertEquals(
+      (await store.listMessages(author, started.thread.id)).items.map((
+        item,
+      ) => item.text),
+      ["Posted anyway"],
+    );
+    assert(
+      getLogs({ level: "warn" }).some((entry) =>
+        entry.source === "follows:auto-follow" &&
+        entry.message.includes("simulated list failure")
+      ),
+      "the swallowed fault must stay visible as a diagnostic",
+    );
+  });
+});
+
+Deno.test("unfollow still removes the follow when its version checks keep losing", async () => {
+  await withStore(async (store) => {
+    const author = session("stubborn-author");
+    const peer = session("stubborn-peer");
+    await store.authenticate(author, "stubborn_author", password);
+    await store.authenticate(peer, "stubborn_peer", password);
+    const category = await store.createCategory(author, "Stubborn");
+    const thread = await store.postThread(author, category.id, "Thread");
+    assertEquals(
+      (await store.followThread(peer, thread.thread.id)).followers,
+      2,
+    );
+    const countKey = ["thread-follower-count", thread.thread.id];
+    assertEquals((await store.kv.get<number>(countKey)).value, 2);
+
+    // Every version-checked commit loses, so unfollow reaches its fallback.
+    const original = store.kv.atomic.bind(store.kv);
+    let failures = 5;
+    store.kv.atomic = () => {
+      const op = original();
+      const commit = op.commit.bind(op);
+      op.commit = () =>
+        failures-- > 0 ? Promise.resolve({ ok: false }) : commit();
+      return op;
+    };
+    let result: { following: boolean; followers: number };
+    try {
+      result = await store.unfollowThread(peer, thread.thread.id);
+    } finally {
+      store.kv.atomic = original;
+    }
+    assertEquals(result.following, false);
+    assertEquals(result.followers, 1);
+    // The fallback must not leave the counter inflated, or the thread would
+    // reject a new follower for good.
+    assertEquals((await store.kv.get<number>(countKey)).value, 1);
+    assertEquals(await countKeyPrefix(store.kv, ["thread-follower"]), 1);
+    assertEquals(await countKeyPrefix(store.kv, ["follow"]), 1);
+    const replacement = session("stubborn-replacement");
+    await store.authenticate(replacement, "stubborn_replacement", password);
+    assertEquals(
+      (await store.followThread(replacement, thread.thread.id)).followers,
+      2,
+    );
   });
 });
 

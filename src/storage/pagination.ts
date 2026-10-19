@@ -35,25 +35,40 @@ export async function listPage<T>(
   resolve: (entry: Deno.KvEntryMaybe<unknown>) => Promise<T | null>,
   reverse = false,
 ) {
-  // The iterator carries no entry budget of its own: resolvers drop deleted
-  // messages and suspended accounts, and a raw budget would return a short page
-  // with no cursor, hiding everything behind those entries. `nextPosition`
-  // follows the last returned entry, so entries that resolved to null are
-  // re-examined by the next page instead of being skipped.
+  // A page is filled with resolved values, so entries a resolver drops — a
+  // deleted message, a suspended account — never hide the entries behind them.
+  // The scan stays bounded: one request examines at most this many index
+  // entries, and the cursor it returns resumes exactly where it stopped, so a
+  // run of dropped entries costs more requests rather than an unbounded one.
+  const budget = limit * 4 + 32;
   const iter = kv.list({ prefix }, { cursor, reverse });
   const items: T[] = [];
-  let nextPosition: string | undefined;
+  let examinedThrough: string | undefined;
+  let returnedThrough: string | undefined;
+  let scanned = 0;
+  let filled = false;
   let hasMore = false;
   for await (const entry of iter) {
+    if (scanned === budget) {
+      hasMore = true;
+      break;
+    }
+    scanned++;
     const value = await resolve(entry);
+    examinedThrough = iter.cursor;
     if (value === null) continue;
     if (items.length === limit) {
+      filled = true;
       hasMore = true;
       break;
     }
     items.push(value);
-    nextPosition = iter.cursor;
+    returnedThrough = iter.cursor;
   }
+  // Stopping with a full page leaves one examined entry unreturned, so the next
+  // page starts after the last returned entry and sees it again. Stopping at the
+  // budget has returned everything it examined, so it resumes after that.
+  const nextPosition = filled ? returnedThrough : examinedThrough;
   return {
     items,
     nextCursor: hasMore && nextPosition

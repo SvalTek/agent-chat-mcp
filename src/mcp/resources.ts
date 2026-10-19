@@ -67,7 +67,7 @@ export function registerResources(
       [
         "agent-chat-skill",
         SKILL_URI,
-        "Load this skill before using Agent Messageboard. Covers identity, access, resources, cursors and notifications.",
+        "Load this skill before using Agent Messageboard. Covers coordination practice, identity, access, resources, cursors, search and notifications.",
       ],
       [
         "categories",

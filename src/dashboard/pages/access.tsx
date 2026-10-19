@@ -151,11 +151,22 @@ export function GatewayAccessPage(
               const expired = r.expiresAt
                 ? Date.parse(r.expiresAt) <= Date.now()
                 : false;
+              const retired = r.kind === "api";
               return (
                 <Badge
-                  tone={r.revokedAt ? "error" : expired ? "warning" : "success"}
+                  tone={r.revokedAt
+                    ? "error"
+                    : retired || expired
+                    ? "warning"
+                    : "success"}
                 >
-                  {r.revokedAt ? "Revoked" : expired ? "Expired" : "Active"}
+                  {r.revokedAt
+                    ? "Revoked"
+                    : retired
+                    ? "Retired"
+                    : expired
+                    ? "Expired"
+                    : "Active"}
                 </Badge>
               );
             },

@@ -17,6 +17,17 @@ const MENTION_RE = /(?<![\w@])@([A-Za-z][A-Za-z0-9_-]{2,31})(?![A-Za-z0-9_-])/g;
 const MAX_MENTIONS = 20;
 const MAX_TEXT_LENGTH = 20000;
 
+/** Candidate messages one search examines before it stops. */
+const SEARCH_SCAN_LIMIT = 1000;
+
+/** A search hit: the indexed position plus the current message. */
+export interface SearchItem {
+  messageId: string;
+  threadId: string;
+  categoryId: string | null;
+  message: Message;
+}
+
 /** Retry controls shared by the write tools that machine clients may repeat. */
 export interface WriteOptions {
   /**
@@ -637,6 +648,85 @@ export class Messages {
       },
       true,
     );
+  }
+
+  /**
+   * Substring search over a bounded window of message text. Candidates are
+   * examined newest first — the board's feed index for board and category
+   * scopes, the thread's own index for a thread scope — and the scan stops
+   * after `SEARCH_SCAN_LIMIT` candidate positions or as soon as `limit` matches
+   * are found, so matches come back newest first without ranking. DM traffic is
+   * reachable only inside its own thread.
+   */
+  async search(
+    session: SessionIdentity,
+    options: {
+      query: string;
+      categoryId?: string;
+      threadId?: string;
+      limit?: number;
+    },
+  ) {
+    const query = options.query.trim();
+    if (!query) throw new Error("Enter a search query.");
+    if (options.categoryId && options.threadId) {
+      throw new Error("Search one thread or one category, not both.");
+    }
+    const limit = pageLimit(options.limit);
+    let prefix = FEED_PREFIX;
+    let threadCategoryId: string | null = null;
+    if (options.threadId) {
+      const thread = await this.getThread(options.threadId);
+      if (!thread) throw new Error("Thread not found.");
+      if (
+        thread.kind !== "public" && !await this.canReadDm(session, thread.id)
+      ) throw new Error("Private conversation unavailable.");
+      prefix = ["thread-message", thread.id];
+      threadCategoryId = thread.categoryId;
+    } else if (options.categoryId) {
+      const category = await this.kv.get<Category>([
+        "category",
+        options.categoryId,
+      ]);
+      if (!category.value || category.value.deletedAt) {
+        throw new Error("Category not found.");
+      }
+    }
+
+    const needle = query.toLowerCase();
+    const items: SearchItem[] = [];
+    let scanned = 0;
+    let truncated = false;
+    // One entry of headroom distinguishes "window cut off" from "index ended".
+    for await (
+      const entry of this.kv.list({ prefix }, {
+        limit: SEARCH_SCAN_LIMIT + 1,
+        reverse: true,
+      })
+    ) {
+      if (scanned >= SEARCH_SCAN_LIMIT) {
+        truncated = true;
+        break;
+      }
+      scanned++;
+      const messageId = options.threadId
+        ? String(entry.value)
+        : (entry.value as FeedEntry).messageId;
+      const categoryId = options.threadId
+        ? threadCategoryId
+        : (entry.value as FeedEntry).categoryId;
+      if (options.categoryId && categoryId !== options.categoryId) continue;
+      const message = await this.getMessage(messageId);
+      if (!message || !message.text.toLowerCase().includes(needle)) continue;
+      items.push({
+        messageId: message.id,
+        threadId: message.threadId,
+        categoryId,
+        message,
+      });
+      if (items.length >= limit) break;
+    }
+    return { query, scanned, scanLimit: SEARCH_SCAN_LIMIT, truncated, items };
   }
 
   async canReadDm(session: SessionIdentity, threadId: string) {

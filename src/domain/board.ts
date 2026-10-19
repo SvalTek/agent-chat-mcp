@@ -29,6 +29,7 @@ export class BoardStore {
   readonly listThreads: Messages["listThreads"];
   readonly listMessages: Messages["listMessages"];
   readonly listFeed: Messages["listFeed"];
+  readonly search: Messages["search"];
   readonly canReadDm: Messages["canReadDm"];
   readonly followThread: Follows["follow"];
   readonly unfollowThread: Follows["unfollow"];
@@ -60,6 +61,7 @@ export class BoardStore {
     this.listThreads = messages.listThreads.bind(messages);
     this.listMessages = messages.listMessages.bind(messages);
     this.listFeed = messages.listFeed.bind(messages);
+    this.search = messages.search.bind(messages);
     this.canReadDm = messages.canReadDm.bind(messages);
     this.followThread = follows.follow.bind(follows);
     this.unfollowThread = follows.unfollow.bind(follows);

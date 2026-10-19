@@ -524,6 +524,170 @@ Deno.test("the agent directory lists profiles and hides suspended accounts", asy
   });
 });
 
+Deno.test("board search stays inside its scope, newest first, and never leaks DMs", async () => {
+  await withStore(async (store) => {
+    const author = session("search-author");
+    const peer = session("search-peer");
+    const anonymous = session("search-anonymous");
+    await store.authenticate(author, "search_author", password);
+    await store.authenticate(peer, "search_peer", password);
+    const coordination = await store.createCategory(author, "Coordination");
+    const social = await store.createCategory(author, "Social");
+    const thread = await store.postThread(
+      author,
+      coordination.id,
+      "Rollout checklist ready",
+    );
+    await store.reply(peer, thread.thread.id, "Checklist reviewed");
+    await store.postThread(author, social.id, "Lunch plans");
+    const dm = await store.sendDm(
+      author,
+      "search_peer",
+      "Checklist is private",
+    );
+
+    const board = await store.search(author, { query: "checklist" });
+    assertEquals(
+      board.items.map((item) => item.message.text),
+      ["Checklist reviewed", "Rollout checklist ready"],
+    );
+    assertEquals(
+      board.items.map((item) => item.categoryId),
+      [coordination.id, coordination.id],
+    );
+    assertEquals(board.scanned, 3, "the DM message is not a board candidate");
+    assertEquals(board.truncated, false);
+    assertEquals(board.scanLimit, 1000);
+
+    const inCategory = await store.search(author, {
+      query: "checklist",
+      categoryId: coordination.id,
+    });
+    assertEquals(inCategory.items.length, 2);
+    assertEquals(
+      (await store.search(author, {
+        query: "checklist",
+        categoryId: social.id,
+      }))
+        .items.length,
+      0,
+    );
+
+    const inThread = await store.search(peer, {
+      query: "CHECKLIST",
+      threadId: thread.thread.id,
+    });
+    assertEquals(
+      inThread.items.map((item) => item.message.text),
+      ["Checklist reviewed", "Rollout checklist ready"],
+      "matching is case-insensitive",
+    );
+
+    const firstMatchOnly = await store.search(author, {
+      query: "checklist",
+      limit: 1,
+    });
+    assertEquals(
+      firstMatchOnly.items.map((item) => item.message.text),
+      ["Checklist reviewed"],
+    );
+    assertEquals(
+      firstMatchOnly.scanned,
+      2,
+      "the scan stops once the page is full",
+    );
+
+    assertEquals(
+      (await store.search(peer, { query: "private" })).items.length,
+      0,
+    );
+    assertEquals(
+      (
+        await store.search(peer, { query: "private", threadId: dm.threadId })
+      ).items.map((item) => item.message.text),
+      ["Checklist is private"],
+    );
+    await assertRejects(
+      () =>
+        store.search(anonymous, { query: "private", threadId: dm.threadId }),
+      Error,
+      "Private conversation unavailable",
+    );
+    await assertRejects(
+      () =>
+        store.search(anonymous, {
+          query: "x",
+          categoryId: coordination.id,
+          threadId: thread.thread.id,
+        }),
+      Error,
+      "one thread or one category",
+    );
+    await assertRejects(
+      () => store.search(author, { query: " " }),
+      Error,
+      "Enter a search query",
+    );
+    await assertRejects(
+      () =>
+        store.search(author, { query: "x", categoryId: crypto.randomUUID() }),
+      Error,
+      "Category not found",
+    );
+    await assertRejects(
+      () => store.search(author, { query: "x", threadId: crypto.randomUUID() }),
+      Error,
+      "Thread not found",
+    );
+  });
+});
+
+Deno.test("board search stops at its scan window and reports the truncation", async () => {
+  await withStore(async (store) => {
+    const author = session("window-search-author");
+    await store.authenticate(author, "window_search", password);
+    const category = await store.createCategory(author, "Window");
+    const thread = await store.postThread(
+      author,
+      category.id,
+      "needle in the oldest message",
+    );
+    // Seeded stamps sort after real versionstamps, so a reverse scan meets them
+    // first and they stand in for a long board history.
+    const seedWindow = async (count: number) => {
+      for (let start = 0; start < count; start += 100) {
+        const op = store.kv.atomic();
+        for (let index = start; index < Math.min(start + 100, count); index++) {
+          op.set(["feed", `seed-${String(index).padStart(5, "0")}`], {
+            messageId: crypto.randomUUID(),
+            threadId: crypto.randomUUID(),
+            categoryId: category.id,
+          });
+        }
+        await op.commit();
+      }
+    };
+
+    await seedWindow(999);
+    const inside = await store.search(author, { query: "needle" });
+    assertEquals(inside.items.map((item) => item.message.id), [
+      thread.message.id,
+    ]);
+    assertEquals(inside.scanned, 1000);
+    assertEquals(inside.truncated, false, "the index ended inside the window");
+
+    await seedWindow(1000);
+    const clipped = await store.search(author, { query: "needle" });
+    assertEquals(
+      clipped.items.length,
+      0,
+      "the oldest match is outside the window",
+    );
+    assertEquals(clipped.scanned, 1000);
+    assertEquals(clipped.truncated, true);
+  });
+});
+
 Deno.test("the catch-up feed lists public messages newest first and never DMs", async () => {
   await withStore(async (store) => {
     const author = session("feed-author");

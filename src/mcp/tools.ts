@@ -148,6 +148,28 @@ export function registerTools(
   );
   server.tool(
     {
+      name: "board_search",
+      description:
+        "Find messages whose text contains a substring, newest first. Pass threadId to search one thread or categoryId to search one category; leave both out to search the whole board. DM messages are searchable only inside their own thread. The scan covers the newest 1000 messages in scope and stops once `limit` matches are found, so an empty result is not proof of absence.",
+      inputSchema: z.object({
+        query: z.string().min(1).max(200),
+        categoryId: id.optional(),
+        threadId: id.optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      }),
+    },
+    async ({ query, categoryId, threadId, limit }, ctx) =>
+      result(
+        await store.search(identity(ctx), {
+          query,
+          categoryId,
+          threadId,
+          limit,
+        }),
+      ),
+  );
+  server.tool(
+    {
       name: "inbox_mark_read",
       description:
         "Acknowledge inbox entries through the exact readCursor supplied on the last inbox item processed, never a message/thread ID. Skip for an empty inbox. Later arrivals stay unread; resource reads have no side effects.",

@@ -5,6 +5,40 @@ export interface GatewayOptions {
   url?: string;
   gatewayToken?: string;
 }
+export interface GatewayLogEntry {
+  timestamp: string;
+  level: "debug" | "info" | "warn" | "error";
+  source: "http-gateway" | "mcp-gateway";
+  message: string;
+  context?: { sessionId?: string };
+}
+const gatewayLogs: GatewayLogEntry[] = [];
+const MAX_GATEWAY_LOGS = 500;
+export function recordGatewayLog(
+  level: GatewayLogEntry["level"],
+  source: GatewayLogEntry["source"],
+  message: string,
+  sessionId?: string,
+) {
+  const safeMessage = message
+    .replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]")
+    .replace(/("?(?:password|accessToken|gatewayToken|authorization)"?\s*[:=]\s*"?)[^\s,"'}]+/gi, "$1[redacted]");
+  const entry: GatewayLogEntry = {
+    timestamp: new Date().toISOString(),
+    level,
+    source,
+    message: safeMessage,
+    ...(sessionId ? { context: { sessionId } } : {}),
+  };
+  gatewayLogs.push(entry);
+  if (gatewayLogs.length > MAX_GATEWAY_LOGS) {
+    gatewayLogs.splice(0, gatewayLogs.length - MAX_GATEWAY_LOGS);
+  }
+  console.error(`[${source}] ${safeMessage}${sessionId ? ` (session ${sessionId})` : ""}`);
+}
+export function getGatewayLogs() {
+  return gatewayLogs.slice();
+}
 export function optionsFromArgs(args: string[]) {
   const options = {
     url: Deno.env.get("AGENT_CHAT_BACKEND_URL") ?? "http://127.0.0.1:8787",
@@ -38,6 +72,7 @@ export class Gateway {
   private retry?: ReturnType<typeof setTimeout>;
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private closed = false;
+  private diagnosticSessionId?: string;
   private generation = 0;
   private queue: Promise<unknown> = Promise.resolve();
   private pending = new Map<
@@ -51,6 +86,9 @@ export class Gateway {
   readonly subscriptions = new Set<string>();
   readonly base: URL;
   readonly server: Server;
+  setDiagnosticSessionId(sessionId: string) {
+    this.diagnosticSessionId = sessionId;
+  }
   constructor(readonly options: GatewayOptions = {}) {
     const url = new URL(
       options.url ?? Deno.env.get("AGENT_CHAT_BACKEND_URL") ??
@@ -108,6 +146,36 @@ export class Gateway {
     this.server.setRequestHandler("tools/call", (req) =>
       this.run(async () => {
         try {
+          if (req.params.name === "get_logs") {
+            const result = await this.connection!.callTool(
+              req.params.name,
+              (req.params.arguments ?? {}) as Record<string, unknown>,
+            ) as { content?: { type: string; text?: string }[] };
+            const text = result.content?.find((item) => item.type === "text")
+              ?.text;
+            if (text) {
+              try {
+                const args = (req.params.arguments ?? {}) as {
+                  limit?: number;
+                  level?: GatewayLogEntry["level"];
+                };
+                const backend = JSON.parse(text);
+                if (Array.isArray(backend)) {
+                  const merged = [...backend, ...getGatewayLogs()]
+                    .filter((entry) => !args.level || entry.level === args.level)
+                    .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+                    .slice(-Math.min(Math.max(args.limit ?? 100, 1), 500));
+                  return {
+                    ...result,
+                    content: result.content!.map((item) =>
+                      item.type === "text" ? { ...item, text: JSON.stringify(merged, null, 2) } : item
+                    ),
+                  };
+                }
+              } catch { /* Preserve the upstream response if it is not JSON. */ }
+            }
+            return result;
+          }
           if (req.params.name === "auth") {
             const args = req.params.arguments ?? {};
             const data = await this.api("/auth/agent", {
@@ -127,6 +195,12 @@ export class Gateway {
             (req.params.arguments ?? {}) as Record<string, unknown>,
           ) as never;
         } catch (error) {
+          recordGatewayLog(
+            "error",
+            "mcp-gateway",
+            `Tool ${req.params.name} failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+            this.diagnosticSessionId,
+          );
           return {
             isError: true,
             content: [{
@@ -137,7 +211,7 @@ export class Gateway {
             }],
           };
         }
-      }));
+      }) as never);
     this.server.setRequestHandler(
       "resources/read",
       (req) =>
@@ -185,7 +259,20 @@ export class Gateway {
       await gateway.connectMcp();
       return gateway;
     } catch (error) {
-      await gateway.close();
+      recordGatewayLog(
+        "error",
+        "mcp-gateway",
+        `Gateway startup failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+      );
+      try {
+        await gateway.close();
+      } catch (closeError) {
+        recordGatewayLog(
+          "error",
+          "mcp-gateway",
+          `Startup cleanup failed: ${closeError instanceof Error ? `${closeError.name}: ${closeError.message}` : String(closeError)}`,
+        );
+      }
       throw error;
     }
   }
@@ -286,6 +373,14 @@ export class Gateway {
         this.connectedClientInfo !== JSON.stringify(this.clientHeaders())
       ) await this.connectMcp();
       return await operation();
+    });
+    void result.catch((error) => {
+      recordGatewayLog(
+        "error",
+        "mcp-gateway",
+        `Request failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+        this.diagnosticSessionId,
+      );
     });
     this.queue = result.catch(() => {});
     return result;
@@ -390,6 +485,8 @@ export class Gateway {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    const started = Date.now();
+    recordGatewayLog("info", "mcp-gateway", "Gateway close started", this.diagnosticSessionId);
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.stopSocket();
     const client = this.client;
@@ -397,11 +494,35 @@ export class Gateway {
     this.connection = undefined;
     if (this.token) {
       try {
+        recordGatewayLog("info", "mcp-gateway", "Backend session deletion started", this.diagnosticSessionId);
         await this.api("/auth/session", undefined, "DELETE");
-      } catch { /* Backend may already be unavailable. */ }
+        recordGatewayLog("info", "mcp-gateway", "Backend session deletion completed", this.diagnosticSessionId);
+      } catch (error) {
+        recordGatewayLog(
+          "warn",
+          "mcp-gateway",
+          `Backend session deletion failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+          this.diagnosticSessionId,
+        );
+      }
     }
     this.token = "";
     this.subscriptions.clear();
-    if (client) await client.close();
+    if (client) {
+      try {
+        recordGatewayLog("info", "mcp-gateway", "Upstream MCP client close started", this.diagnosticSessionId);
+        await client.close();
+        recordGatewayLog("info", "mcp-gateway", "Upstream MCP client close completed", this.diagnosticSessionId);
+      } catch (error) {
+        recordGatewayLog(
+          "error",
+          "mcp-gateway",
+          `Upstream MCP client close failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+          this.diagnosticSessionId,
+        );
+        throw error;
+      }
+    }
+    recordGatewayLog("info", "mcp-gateway", `Gateway close completed in ${Date.now() - started}ms`, this.diagnosticSessionId);
   }
 }

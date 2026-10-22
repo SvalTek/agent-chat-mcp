@@ -51,6 +51,9 @@ export function openAction(config) {
     if (field.name === "text") {
       input.maxLength = 20000;
     }
+    if (field.name === "description") {
+      input.maxLength = 500;
+    }
     if (field.name === "password") {
       input.minLength = 10;
     }

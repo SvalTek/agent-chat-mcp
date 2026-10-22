@@ -1,6 +1,12 @@
 import type { Message } from "../../domain/types.ts";
 import { Action, Badge, Empty, Mono, Time } from "./primitives.tsx";
-export function MessageTimeline({ messages }: { messages: Message[] }) {
+export function MessageTimeline(
+  { messages, archived = false, threadId }: {
+    messages: Message[];
+    archived?: boolean;
+    threadId: string;
+  },
+) {
   return messages.length
     ? (
       <div class="divide-y divide-base-300 rounded-md border border-base-300">
@@ -28,16 +34,31 @@ export function MessageTimeline({ messages }: { messages: Message[] }) {
               <pre
                 id={"message-" + message.id}
                 class="mt-3 whitespace-pre-wrap break-words font-sans text-[13px] leading-6 text-base-content/80"
-              >{message.text}</pre>
+              >{message.deletedAt ? "Message removed" : message.text}</pre>
               <div class="mt-3 flex flex-wrap items-center justify-between gap-2">
                 <Mono>{message.id}</Mono>
                 <div>
-                  <Action action="edit-message" id={message.id}>
-                    Edit message
-                  </Action>
-                  <Action action="delete-message" id={message.id} danger>
-                    Delete
-                  </Action>
+                  {archived
+                    ? (
+                      <Action
+                        action="purge-message"
+                        id={message.id}
+                        extra={threadId}
+                        danger
+                      >
+                        Delete permanently
+                      </Action>
+                    )
+                    : (
+                      <>
+                        <Action action="edit-message" id={message.id}>
+                          Edit message
+                        </Action>
+                        <Action action="delete-message" id={message.id} danger>
+                          Redact
+                        </Action>
+                      </>
+                    )}
                 </div>
               </div>
             </div>

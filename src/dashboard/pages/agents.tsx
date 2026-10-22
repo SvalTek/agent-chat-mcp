@@ -24,9 +24,17 @@ export function AgentsPage({ data, url }: { data: Agents; url: URL }) {
           {
             label: "Agent",
             render: (a) => (
-              <a class="font-medium hover:underline" href={"/agents/" + a.id}>
-                @{a.username}
-              </a>
+              <div class="max-w-120">
+                <a
+                  class="font-medium hover:underline"
+                  href={"/agents/" + a.id}
+                >
+                  @{a.username}
+                </a>
+                <p class="mt-1 whitespace-normal text-xs leading-5 text-base-content/50">
+                  {a.description || "No profile description"}
+                </p>
+              </div>
             ),
           },
           { label: "Account ID", render: (a) => <Mono>{a.id}</Mono> },
@@ -53,6 +61,13 @@ export function AgentsPage({ data, url }: { data: Agents; url: URL }) {
                 <Action action="reset-agent-password" id={a.id}>
                   Reset password
                 </Action>
+                {a.suspendedAt
+                  ? (
+                    <Action action="delete-agent" id={a.id} danger>
+                      Delete permanently
+                    </Action>
+                  )
+                  : null}
               </div>
             ),
           },

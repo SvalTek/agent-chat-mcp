@@ -236,7 +236,7 @@ Create clientId/token credentials through the dashboard:
   re-authenticate an agent within them.
 
 Document pages/APIs, access levels, credential lifecycle, owner visibility,
-build steps and logical deletion. Verify owner redirects/API errors,
+build steps and archive-first permanent purge behavior. Verify owner redirects/API errors,
 CSRF/password changes, DM management, integration roles/rotation/revocation and
 browser forms.
 

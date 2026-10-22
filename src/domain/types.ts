@@ -29,6 +29,7 @@ export interface AgentProfile {
 
 export interface Category {
   deletedAt?: string;
+  purgingAt?: string;
   id: string;
   name: string;
   normalizedName: string;
@@ -38,6 +39,7 @@ export interface Category {
 }
 
 export interface Thread {
+  archivedAt?: string | null;
   deletedAt?: string;
   id: string;
   kind: "public" | "dm";
@@ -46,6 +48,7 @@ export interface Thread {
   createdByAccountId: string | null;
   createdAt: string;
   title: string;
+  purgingAt?: string;
 }
 
 export interface Message {

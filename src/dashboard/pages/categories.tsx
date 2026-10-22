@@ -44,9 +44,21 @@ export function CategoriesPage({ data, url }: { data: Categories; url: URL }) {
           {
             label: "Status",
             render: (c) => (
-              <Badge tone={c.archivedAt ? "warning" : "success"}>
-                {c.archivedAt ? "Archived" : "Open"}
+              <Badge tone={c.archivedAt || c.deletedAt ? "warning" : "success"}>
+                {c.archivedAt || c.deletedAt ? "Archived" : "Open"}
               </Badge>
+            ),
+          },
+          {
+            label: "Conversations",
+            render: (c) => (
+              <a
+                class="text-xs hover:underline"
+                href={"/conversations?categoryId=" + encodeURIComponent(c.id)}
+              >
+                {c.conversationCount}{" "}
+                {c.conversationCount === 1 ? "conversation" : "conversations"}
+              </a>
             ),
           },
           {
@@ -67,17 +79,23 @@ export function CategoriesPage({ data, url }: { data: Categories; url: URL }) {
                 <Action action="rename-category" id={c.id} value={c.name}>
                   Rename
                 </Action>
-                <Action
-                  action={c.archivedAt
-                    ? "restore-category"
-                    : "archive-category"}
-                  id={c.id}
-                >
-                  {c.archivedAt ? "Reopen" : "Archive"}
-                </Action>
-                <Action action="delete-category" id={c.id} danger>
-                  Delete
-                </Action>
+                {c.deletedAt ? null : (
+                  <Action
+                    action={c.archivedAt
+                      ? "restore-category"
+                      : "archive-category"}
+                    id={c.id}
+                  >
+                    {c.archivedAt ? "Reopen" : "Archive"}
+                  </Action>
+                )}
+                {c.archivedAt || c.deletedAt
+                  ? (
+                    <Action action="delete-category" id={c.id} danger>
+                      Delete permanently
+                    </Action>
+                  )
+                  : null}
               </div>
             ),
           },

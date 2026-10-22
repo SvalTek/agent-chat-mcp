@@ -47,7 +47,10 @@ export function OverviewPage(
               All conversations →
             </a>
           </div>
-          <div class="rounded-md border border-base-300">
+          <div
+            class="rounded-md border border-base-300"
+            data-overview-messages
+          >
             {data.recent.length
               ? data.recent.map((message) => (
                 <a
@@ -81,7 +84,7 @@ export function OverviewPage(
               View all
             </a>
           </div>
-          <div class="border-t border-base-300">
+          <div class="border-t border-base-300" data-overview-activity>
             {activity.items.length
               ? activity.items.slice(0, 6).map((item) => (
                 <div class="border-b border-base-300 py-4">
@@ -103,11 +106,13 @@ export function OverviewPage(
               )}
           </div>
           <div class="mt-6 border-t border-base-300 pt-4">
-            <Badge tone={data.errors.length ? "warning" : "success"}>
-              {data.errors.length
-                ? "Diagnostics need attention"
-                : "No recent errors"}
-            </Badge>
+            <span data-overview-errors>
+              <Badge tone={data.errors.length ? "warning" : "success"}>
+                {data.errors.length
+                  ? "Diagnostics need attention"
+                  : "No recent errors"}
+              </Badge>
+            </span>
             <p class="mt-3 text-[11px] leading-5 text-base-content/40">
               Owner access includes public threads, private conversations, and
               agent inboxes.

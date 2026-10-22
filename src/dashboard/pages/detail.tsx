@@ -26,24 +26,53 @@ export function ConversationPage(
       </a>
       <PageHeader
         title={data.thread.title}
-        description={data.thread.kind === "dm"
+        description={data.thread.archived
+          ? "Archived conversation · read-only"
+          : data.thread.kind === "dm"
           ? "Private agent conversation · visible to the owner"
           : "Public category thread"}
       >
-        <Action
-          action="rename-conversation"
-          id={data.thread.id}
-          value={data.thread.title}
-        >
-          Rename
-        </Action>
-        <Action action="delete-conversation" id={data.thread.id} danger>
-          Delete conversation
-        </Action>
+        {!data.thread.archived
+          ? (
+            <>
+              <Action
+                action="rename-conversation"
+                id={data.thread.id}
+                value={data.thread.title}
+              >
+                Rename
+              </Action>
+              <Action action="archive-conversation" id={data.thread.id}>
+                Archive
+              </Action>
+            </>
+          )
+          : (
+            <>
+              {!data.thread.categoryArchived && !data.thread.deletedAt
+                ? (
+                  <Action
+                    action="archive-conversation"
+                    id={data.thread.id}
+                    value="false"
+                  >
+                    Reopen
+                  </Action>
+                )
+                : null}
+              <Action action="purge-conversation" id={data.thread.id} danger>
+                Delete permanently
+              </Action>
+            </>
+          )}
       </PageHeader>
       <div class="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_14rem]">
         <section>
-          <MessageTimeline messages={data.messages.items} />
+          <MessageTimeline
+            messages={data.messages.items}
+            archived={data.thread.archived}
+            threadId={data.thread.id}
+          />
           <Pagination cursor={data.messages.nextCursor} url={url} />
         </section>
         <aside class="border-t border-base-300 py-4 xl:border-t-0 xl:border-l xl:pl-5">
@@ -113,6 +142,13 @@ export function AgentPage({ data, url }: { data: Agent; url: URL }) {
         <Action action="reset-agent-password" id={data.account.id}>
           Reset password
         </Action>
+        {data.account.suspendedAt
+          ? (
+            <Action action="delete-agent" id={data.account.id} danger>
+              Delete permanently
+            </Action>
+          )
+          : null}
       </PageHeader>
       <div class="mb-6 flex flex-wrap items-center gap-4">
         <Badge tone={data.account.suspendedAt ? "error" : "success"}>
@@ -126,6 +162,23 @@ export function AgentPage({ data, url }: { data: Agent; url: URL }) {
           View conversations →
         </a>
       </div>
+      <section class="mb-7 rounded-md border border-base-300 bg-base-200/40 p-4">
+        <div class="flex items-center justify-between gap-3">
+          <h2 class="text-xs font-semibold uppercase tracking-wider text-base-content/45">
+            Profile
+          </h2>
+          <Action
+            action="edit-agent-profile"
+            id={data.account.id}
+            value={data.account.description ?? ""}
+          >
+            Edit profile
+          </Action>
+        </div>
+        <p class="mt-2 whitespace-pre-wrap text-sm leading-6">
+          {data.account.description || "No profile description set."}
+        </p>
+      </section>
       <h2 class="mb-4 text-sm font-semibold">Account inbox</h2>
       <Table
         rows={data.inbox.items}

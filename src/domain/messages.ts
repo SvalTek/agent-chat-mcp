@@ -119,7 +119,10 @@ export class Messages {
       !(await readSettings(this.kv)).anonymousPostingEnabled
     ) throw new Error("Anonymous posting is disabled by the owner.");
     const categoryEntry = await this.kv.get<Category>(["category", categoryId]);
-    if (!categoryEntry.value || categoryEntry.value.deletedAt) {
+    if (
+      !categoryEntry.value || categoryEntry.value.deletedAt ||
+      categoryEntry.value.purgingAt
+    ) {
       throw new Error("Category not found.");
     }
     if (categoryEntry.value.archivedAt) {
@@ -258,7 +261,10 @@ export class Messages {
       !(await readSettings(this.kv)).anonymousPostingEnabled
     ) throw new Error("Anonymous posting is disabled by the owner.");
     const threadEntry = await this.kv.get<Thread>(["thread", threadId]);
-    if (!threadEntry.value || threadEntry.value.deletedAt) {
+    if (
+      !threadEntry.value || threadEntry.value.deletedAt ||
+      threadEntry.value.purgingAt || threadEntry.value.archivedAt
+    ) {
       throw new Error("Thread not found.");
     }
     if (threadEntry.value.kind !== "public") {
@@ -268,7 +274,10 @@ export class Messages {
       "category",
       threadEntry.value.categoryId!,
     ]);
-    if (!categoryEntry.value || categoryEntry.value.deletedAt) {
+    if (
+      !categoryEntry.value || categoryEntry.value.deletedAt ||
+      categoryEntry.value.purgingAt
+    ) {
       throw new Error("Category not found.");
     }
     if (categoryEntry.value.archivedAt) {
@@ -497,8 +506,16 @@ export class Messages {
     if (!threadId) {
       throw new Error("Could not open the direct-message thread; retry.");
     }
+    const threadEntry = await this.kv.get<Thread>(["thread", threadId]);
+    if (
+      !threadEntry.value || threadEntry.value.deletedAt ||
+      threadEntry.value.archivedAt || threadEntry.value.purgingAt
+    ) {
+      throw new Error("This conversation is archived and read-only.");
+    }
     const message = await this.makeMessage(session, threadId, text, []);
     const op = this.kv.atomic()
+      .check(threadEntry)
       .set(["message", message.id], message)
       .set(
         ["thread-message", threadId, this.kv.commitVersionstamp()],
@@ -586,7 +603,10 @@ export class Messages {
     const categoryEntry = threadEntry.value?.categoryId
       ? await this.kv.get<Category>(["category", threadEntry.value.categoryId])
       : null;
-    if (categoryEntry?.value?.archivedAt) {
+    if (
+      threadEntry.value?.archivedAt || threadEntry.value?.purgingAt ||
+      categoryEntry?.value?.archivedAt || categoryEntry?.value?.purgingAt
+    ) {
       throw new Error("This category is archived and read-only.");
     }
     const text = validateText(textInput);
@@ -647,12 +667,14 @@ export class Messages {
 
   async getThread(threadId: string) {
     const thread = (await this.kv.get<Thread>(["thread", threadId])).value;
-    if (!thread || thread.deletedAt) return null;
-    if (
-      thread.categoryId &&
-      (await this.kv.get<Category>(["category", thread.categoryId])).value
-        ?.deletedAt
-    ) return null;
+    if (!thread || thread.deletedAt || thread.purgingAt) return null;
+    if (thread.categoryId) {
+      const category = (await this.kv.get<Category>([
+        "category",
+        thread.categoryId,
+      ])).value;
+      if (category?.deletedAt || category?.purgingAt) return null;
+    }
     return thread;
   }
 

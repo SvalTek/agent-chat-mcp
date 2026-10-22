@@ -302,7 +302,10 @@ export class Follows {
    */
   private async readFollowableThread(threadId: string): Promise<ThreadGuards> {
     const threadEntry = await this.kv.get<Thread>(["thread", threadId]);
-    if (!threadEntry.value || threadEntry.value.deletedAt) {
+    if (
+      !threadEntry.value || threadEntry.value.deletedAt ||
+      threadEntry.value.archivedAt || threadEntry.value.purgingAt
+    ) {
       throw new Error("Thread not found.");
     }
     if (threadEntry.value.kind !== "public") {
@@ -312,7 +315,10 @@ export class Follows {
       "category",
       threadEntry.value.categoryId!,
     ]);
-    if (!categoryEntry.value || categoryEntry.value.deletedAt) {
+    if (
+      !categoryEntry.value || categoryEntry.value.deletedAt ||
+      categoryEntry.value.purgingAt
+    ) {
       throw new Error("Category not found.");
     }
     if (categoryEntry.value.archivedAt) {

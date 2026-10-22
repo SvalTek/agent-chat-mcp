@@ -120,7 +120,11 @@ export function Action(
   );
 }
 export function Search(
-  { query, kind = false }: { query: URLSearchParams; kind?: boolean },
+  { query, kind = false, status = false }: {
+    query: URLSearchParams;
+    kind?: boolean;
+    status?: boolean;
+  },
 ) {
   return (
     <form class="mb-5 flex flex-wrap items-center gap-2">
@@ -147,6 +151,26 @@ export function Search(
             </option>
             <option value="dm" selected={query.get("kind") === "dm"}>
               Direct messages
+            </option>
+          </select>
+        )
+        : null}
+      {status
+        ? (
+          <select
+            name="status"
+            class="select select-sm w-36 bg-base-200"
+            aria-label="Conversation status"
+          >
+            <option value="">All conversations</option>
+            <option value="active" selected={query.get("status") === "active"}>
+              Active
+            </option>
+            <option
+              value="archived"
+              selected={query.get("status") === "archived"}
+            >
+              Archived
             </option>
           </select>
         )

@@ -67,9 +67,9 @@ export async function handleAction(button) {
   }
   if (action === "delete-category") {
     return confirmAction(
-      "Delete category",
+      "Permanently delete category",
       "/categories/" + p,
-      "Archive the category and delete its conversations before deleting it.",
+      "This permanently removes the archived category and all of its conversations, messages, inbox entries, and indexes. It cannot be undone.",
     );
   }
   if (action === "rename-conversation") {
@@ -79,11 +79,19 @@ export async function handleAction(button) {
       fields: [{ name: "title", label: "Title", value }],
     });
   }
-  if (action === "delete-conversation") {
+  if (action === "archive-conversation") {
+    await api("/conversations/" + p + "/archive", {
+      method: "PATCH",
+      body: { archived: value !== "false" },
+    });
+    location.reload();
+    return;
+  }
+  if (action === "purge-conversation" || action === "delete-conversation") {
     return confirmAction(
-      "Delete conversation",
+      "Permanently delete conversation",
       "/conversations/" + p,
-      "This removes the conversation from the board. Agents will no longer be able to read it.",
+      "This permanently removes the conversation, messages, inbox entries, and indexes. It cannot be undone.",
       "DELETE",
       undefined,
       "/conversations",
@@ -110,6 +118,13 @@ export async function handleAction(button) {
       "The message text will be removed. This action is recorded in the audit trail.",
     );
   }
+  if (action === "purge-message") {
+    return confirmAction(
+      "Permanently delete message",
+      "/messages/" + p + "/purge",
+      "This permanently removes the message and its inbox and search entries. It cannot be undone.",
+    );
+  }
   if (action === "suspend-agent" || action === "reactivate-agent") {
     return openAction({
       title: action === "suspend-agent" ? "Suspend agent" : "Reactivate agent",
@@ -122,6 +137,16 @@ export async function handleAction(button) {
       danger: action === "suspend-agent",
     });
   }
+  if (action === "delete-agent") {
+    return confirmAction(
+      "Permanently delete agent",
+      "/agents/" + p,
+      "This removes the suspended identity, profile, inbox, and revoked integration credentials. Historical messages remain under their recorded username and ID.",
+      "DELETE",
+      undefined,
+      "/agents",
+    );
+  }
   if (action === "reset-agent-password") {
     return openAction({
       title: "Reset agent password",
@@ -130,6 +155,22 @@ export async function handleAction(button) {
       description:
         "Existing sessions will be disconnected. Use Access credentials to rotate an integration's token.",
       fields: [{ name: "password", label: "New password", type: "password" }],
+    });
+  }
+  if (action === "edit-agent-profile") {
+    return openAction({
+      title: "Edit agent profile",
+      path: "/agents/" + p + "/profile",
+      description:
+        "This description is visible in the agent directory. Changes are saved to the account profile and shared with agents.",
+      fields: [{
+        name: "description",
+        label: "Profile description",
+        type: "textarea",
+        value,
+        required: false,
+      }],
+      submit: "Save profile",
     });
   }
   if (action === "disconnect-session") {
@@ -195,6 +236,15 @@ export async function handleAction(button) {
       "Revoke integration",
       "/integrations/" + p,
       "The credential and all sessions issued from it will stop working. Its stable identity and message history remain.",
+      "PATCH",
+      { revoke: true },
+    );
+  }
+  if (action === "purge-integration") {
+    return confirmAction(
+      "Permanently delete integration",
+      "/integrations/" + p,
+      "This removes the revoked integration credential and its suspended identity. Historical messages remain under their recorded username and ID.",
     );
   }
   if (action === "create-access") {
@@ -222,6 +272,15 @@ export async function handleAction(button) {
       "Revoke access token",
       "/access/" + p,
       "This blocks new sessions and refreshes, and disconnects the board sessions opened with this token.",
+      "PATCH",
+      {},
+    );
+  }
+  if (action === "purge-access") {
+    return confirmAction(
+      "Permanently delete access token record",
+      "/access/" + p,
+      "This permanently removes the revoked or expired token record from storage.",
     );
   }
   notify("This action is unavailable.", true);

@@ -3,7 +3,6 @@ import type { AccessTokenRecord } from "../../auth/access-tokens.ts";
 import {
   Action,
   Badge,
-  Mono,
   PageHeader,
   Pagination,
   Search,
@@ -89,9 +88,14 @@ export function IntegrationsPage(
           { label: "Expires", render: (r) => <Time value={r.expiresAt} /> },
           {
             label: "Manage",
-            render: (r) =>
-              r.revokedAt
-                ? <Mono>Revoked</Mono>
+            render: (r) => {
+              const expired = Date.parse(r.expiresAt) <= Date.now();
+              return r.revokedAt || expired
+                ? (
+                  <Action action="purge-integration" id={r.id} danger>
+                    Delete permanently
+                  </Action>
+                )
                 : (
                   <div class="flex flex-wrap gap-1">
                     <Action
@@ -108,7 +112,8 @@ export function IntegrationsPage(
                       Revoke
                     </Action>
                   </div>
-                ),
+                );
+            },
           },
         ]}
         empty="No integrations created"
@@ -180,14 +185,22 @@ export function GatewayAccessPage(
           },
           {
             label: "Manage",
-            render: (r) =>
-              r.revokedAt
-                ? null
+            render: (r) => {
+              const expired = r.expiresAt
+                ? Date.parse(r.expiresAt) <= Date.now()
+                : false;
+              return r.revokedAt || expired
+                ? (
+                  <Action action="purge-access" id={r.id} danger>
+                    Delete permanently
+                  </Action>
+                )
                 : (
                   <Action action="revoke-access" id={r.id} danger>
                     Revoke
                   </Action>
-                ),
+                );
+            },
           },
         ]}
         empty="No gateway tokens issued"

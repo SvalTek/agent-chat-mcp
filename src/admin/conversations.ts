@@ -1,6 +1,7 @@
 import type { BoardStore, Message, Thread } from "../domain/board.ts";
 import { type Query, records } from "./query.ts";
 import { AdminError, required } from "./errors.ts";
+import { purgeConversation, purgeMessage } from "./purge.ts";
 export class Conversations {
   constructor(readonly store: BoardStore) {}
   async list(query: Query) {
@@ -10,9 +11,23 @@ export class Conversations {
       query,
       async (thread) => {
         if (
-          !await this.store.getThread(thread.id) ||
           query.kind && thread.kind !== query.kind ||
           query.categoryId && thread.categoryId !== query.categoryId
+        ) return false;
+        const category = thread.categoryId
+          ? (await this.store.kv.get<{
+            archivedAt: string | null;
+            deletedAt?: string;
+            purgingAt?: string;
+          }>(["category", thread.categoryId])).value
+          : null;
+        const archived = Boolean(
+          thread.archivedAt || thread.deletedAt || thread.purgingAt ||
+            category?.archivedAt || category?.deletedAt || category?.purgingAt,
+        );
+        if (
+          query.status === "archived" && !archived ||
+          query.status === "active" && archived
         ) return false;
         let authored = !query.agentId ||
           thread.participants.includes(query.agentId) ||
@@ -25,7 +40,10 @@ export class Conversations {
               prefix: ["thread-message", thread.id],
             })
           ) {
-            const message = await this.store.getMessage(entry.value);
+            const message = (await this.store.kv.get<Message>([
+              "message",
+              entry.value,
+            ])).value;
             if (!message) continue;
             if (
               query.agentId && message.senderAccountId === query.agentId
@@ -44,38 +62,78 @@ export class Conversations {
     );
     return {
       ...page,
-      items: await Promise.all(page.items.map(async (thread) => ({
-        ...thread,
-        participantNames: await Promise.all(
-          thread.participants.map(async (id) =>
-            (await this.store.getAccount(id))?.username ?? id
+      items: await Promise.all(page.items.map(async (thread) => {
+        const category = thread.categoryId
+          ? (await this.store.kv.get<{
+            archivedAt: string | null;
+            deletedAt?: string;
+            name: string;
+            purgingAt?: string;
+          }>(["category", thread.categoryId])).value
+          : null;
+        return {
+          ...thread,
+          archived: Boolean(
+            thread.archivedAt || thread.deletedAt || thread.purgingAt ||
+              category?.archivedAt || category?.deletedAt ||
+              category?.purgingAt,
           ),
-        ),
-        categoryName: thread.categoryId
-          ? (await this.store.getCategory(thread.categoryId))?.name
-          : null,
-      }))),
+          participantNames: await Promise.all(
+            thread.participants.map(async (id) =>
+              (await this.store.getAccount(id))?.username ?? id
+            ),
+          ),
+          categoryName: category?.name ?? null,
+        };
+      })),
     };
   }
   async detail(id: string, query: Query = {}) {
     const thread = required(
-      await this.store.getThread(id),
+      (await this.store.kv.get<Thread>(["thread", id])).value,
       "Conversation not found.",
+    );
+    const category = thread.categoryId
+      ? (await this.store.kv.get<{
+        archivedAt: string | null;
+        deletedAt?: string;
+        purgingAt?: string;
+      }>([
+        "category",
+        thread.categoryId,
+      ])).value
+      : null;
+    const archived = Boolean(
+      thread.archivedAt || thread.deletedAt || thread.purgingAt ||
+        category?.archivedAt || category?.deletedAt || category?.purgingAt,
     );
     const page = await records<string>(
       this.store.kv,
       ["thread-message", id],
       { ...query, q: undefined },
-      async (id) => Boolean(await this.store.getMessage(id)),
+      async (messageId) => {
+        const message = (await this.store.kv.get<Message>([
+          "message",
+          messageId,
+        ])).value;
+        return Boolean(message && (archived || !message.deletedAt));
+      },
     );
     const messages = [];
-    // Thread-message entries contain message IDs. Resolve each through the domain visibility rules.
+    // Owners can inspect archived content while it awaits permanent removal.
     for (const value of page.items) {
-      const message = await this.store.getMessage(value);
+      const message = (await this.store.kv.get<Message>(["message", value]))
+        .value;
       if (message) messages.push(message);
     }
     return {
-      thread,
+      thread: {
+        ...thread,
+        archived,
+        categoryArchived: Boolean(
+          category?.archivedAt || category?.deletedAt || category?.purgingAt,
+        ),
+      },
       participants: await Promise.all(
         thread.participants.map(async (id) => ({
           id,
@@ -87,44 +145,117 @@ export class Conversations {
   }
   async update(id: string, title: string) {
     const entry = await this.store.kv.get<Thread>(["thread", id]);
-    required(entry.value);
+    const thread = required(entry.value);
+    if (thread.archivedAt || thread.deletedAt || thread.purgingAt) {
+      throw new AdminError("Archived conversations are read-only.", 409);
+    }
+    const categoryEntry = thread.categoryId
+      ? await this.store.kv.get<{
+        archivedAt: string | null;
+        deletedAt?: string;
+        purgingAt?: string;
+      }>([
+        "category",
+        thread.categoryId,
+      ])
+      : null;
+    if (
+      categoryEntry?.value?.archivedAt || categoryEntry?.value?.deletedAt ||
+      categoryEntry?.value?.purgingAt
+    ) {
+      throw new AdminError("Archived categories are read-only.", 409);
+    }
     if (!title.trim() || title.length > 120) {
       throw new AdminError("Use a title between 1 and 120 characters.");
     }
-    const updated = { ...entry.value!, title: title.trim() };
-    if (
-      !(await this.store.kv.atomic().check(entry).set(entry.key, updated)
-        .commit()).ok
-    ) throw new AdminError("Conversation changed. Reload and retry.", 409);
+    const updated = { ...thread, title: title.trim() };
+    const operation = this.store.kv.atomic().check(entry);
+    if (categoryEntry) operation.check(categoryEntry);
+    if (!(await operation.set(entry.key, updated).commit()).ok) {
+      throw new AdminError("Conversation changed. Reload and retry.", 409);
+    }
     this.publish(updated);
     return updated;
   }
   async remove(id: string) {
+    return await purgeConversation(this.store, id);
+  }
+  async purgeMessage(id: string) {
+    return await purgeMessage(this.store, id);
+  }
+  async archive(id: string, archived: boolean) {
     const entry = await this.store.kv.get<Thread>(["thread", id]);
     const thread = required(entry.value);
-    const operation = this.store.kv.atomic().check(entry).set(entry.key, {
+    if (thread.deletedAt || thread.purgingAt) {
+      throw new AdminError("Conversation is already being purged.", 409);
+    }
+    const categoryEntry = thread.categoryId
+      ? await this.store.kv.get<{
+        archivedAt: string | null;
+        deletedAt?: string;
+        purgingAt?: string;
+      }>([
+        "category",
+        thread.categoryId,
+      ])
+      : null;
+    if (
+      !archived && (
+        categoryEntry?.value?.archivedAt || categoryEntry?.value?.deletedAt ||
+        categoryEntry?.value?.purgingAt
+      )
+    ) {
+      throw new AdminError(
+        "Reopen the category before unarchiving its conversations.",
+        409,
+      );
+    }
+    const updated = {
       ...thread,
-      deletedAt: new Date().toISOString(),
-    });
-    // Release the pair in the same commit so a new DM cannot lose its mapping.
-    if (thread.kind === "dm") {
-      const pair = await this.store.kv.get<string>([
-        "dm-pair",
-        ...thread.participants.slice().sort(),
-      ]);
-      if (pair.value === thread.id) operation.check(pair).delete(pair.key);
+      archivedAt: archived ? new Date().toISOString() : null,
+    };
+    const operation = this.store.kv.atomic().check(entry);
+    if (categoryEntry) operation.check(categoryEntry);
+    if (!(await operation.set(entry.key, updated).commit()).ok) {
+      throw new AdminError("Conversation changed. Retry.", 409);
     }
-    if (!(await operation.commit()).ok) {
-      throw new AdminError("Conversation changed. Reload and retry.", 409);
-    }
-    this.publish(thread);
-    return { deleted: true };
+    this.publish(updated);
+    return updated;
   }
   async editMessage(id: string, text: string) {
     const entry = await this.store.kv.get<Message>(["message", id]);
     const message = required(entry.value);
     if (message.deletedAt) {
       throw new AdminError("Message has been deleted.", 404);
+    }
+    const threadEntry = await this.store.kv.get<Thread>([
+      "thread",
+      message.threadId,
+    ]);
+    const threadRecord = required(threadEntry.value, "Conversation not found.");
+    if (
+      threadRecord.archivedAt || threadRecord.deletedAt ||
+      threadRecord.purgingAt
+    ) {
+      throw new AdminError("Archived conversations are read-only.", 409);
+    }
+    const categoryEntry = threadRecord.categoryId
+      ? await this.store.kv.get<{
+        archivedAt: string | null;
+        deletedAt?: string;
+        purgingAt?: string;
+      }>([
+        "category",
+        threadRecord.categoryId,
+      ])
+      : null;
+    if (categoryEntry) {
+      const category = categoryEntry.value;
+      if (
+        category?.archivedAt || category?.deletedAt || category?.purgingAt
+      ) {
+        throw new AdminError("Archived categories are read-only.", 409);
+      }
     }
     if (
       !text.trim() || text.length > 20000 ||
@@ -140,10 +271,14 @@ export class Conversations {
       editedAt: new Date().toISOString(),
       editedByOwner: true,
     };
-    if (
-      !(await this.store.kv.atomic().check(entry).set(entry.key, updated)
-        .commit()).ok
-    ) throw new AdminError("Message changed. Reload and retry.", 409);
+    const operation = this.store.kv.atomic().check(entry, threadEntry);
+    if (categoryEntry) operation.check(categoryEntry);
+    if (!(await operation.set(entry.key, updated).commit()).ok) {
+      throw new AdminError(
+        "Message or conversation changed. Reload and retry.",
+        409,
+      );
+    }
     const thread = await this.store.getThread(message.threadId);
     if (thread) this.publish(thread);
     return updated;
@@ -151,16 +286,51 @@ export class Conversations {
   async deleteMessage(id: string) {
     const entry = await this.store.kv.get<Message>(["message", id]);
     const message = required(entry.value);
+    const threadEntry = await this.store.kv.get<Thread>([
+      "thread",
+      message.threadId,
+    ]);
+    const thread = required(threadEntry.value, "Conversation not found.");
+    if (thread.archivedAt || thread.deletedAt || thread.purgingAt) {
+      throw new AdminError(
+        "Messages in archived conversations can be permanently removed.",
+        409,
+      );
+    }
+    const categoryEntry = thread.categoryId
+      ? await this.store.kv.get<
+        { archivedAt: string | null; deletedAt?: string; purgingAt?: string }
+      >([
+        "category",
+        thread.categoryId,
+      ])
+      : null;
     if (
-      !(await this.store.kv.atomic().check(entry).set(entry.key, {
+      categoryEntry?.value?.archivedAt || categoryEntry?.value?.deletedAt ||
+      categoryEntry?.value?.purgingAt
+    ) {
+      throw new AdminError(
+        "Messages in archived categories can be permanently removed.",
+        409,
+      );
+    }
+    const operation = this.store.kv.atomic().check(entry, threadEntry);
+    if (categoryEntry) operation.check(categoryEntry);
+    if (
+      !(await operation.set(entry.key, {
         ...message,
         text: "",
         mentions: [],
         deletedAt: new Date().toISOString(),
       }).commit()).ok
-    ) throw new AdminError("Message changed. Reload and retry.", 409);
-    const thread = await this.store.getThread(message.threadId);
-    if (thread) this.publish(thread);
+    ) {
+      throw new AdminError(
+        "Message or conversation changed. Reload and retry.",
+        409,
+      );
+    }
+    const currentThread = await this.store.getThread(message.threadId);
+    if (currentThread) this.publish(currentThread);
     return { deleted: true };
   }
   /**

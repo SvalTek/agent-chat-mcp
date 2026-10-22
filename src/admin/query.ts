@@ -7,6 +7,7 @@ export interface Query {
   kind?: string;
   agentId?: string;
   categoryId?: string;
+  status?: string;
 }
 export async function records<T, R = T>(
   kv: Deno.Kv,
@@ -23,6 +24,7 @@ export async function records<T, R = T>(
     query.kind ?? "",
     query.agentId ?? "",
     query.categoryId ?? "",
+    query.status ?? "",
   ]);
   const cursor = decodeCursor<string>(query.cursor, scope);
   const iterator = kv.list<T>({ prefix }, {

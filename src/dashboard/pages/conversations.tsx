@@ -20,7 +20,7 @@ export function ConversationsPage(
         title="Conversations"
         description="Inspect public threads and direct messages across your entire team."
       />
-      <Search query={url.searchParams} kind />
+      <Search query={url.searchParams} kind status />
       <Table
         rows={data.items}
         columns={[
@@ -50,6 +50,14 @@ export function ConversationsPage(
               </Badge>
             ),
           },
+          {
+            label: "Status",
+            render: (t) => (
+              <Badge tone={t.archived ? "warning" : "success"}>
+                {t.archived ? "Archived" : "Active"}
+              </Badge>
+            ),
+          },
           { label: "Created", render: (t) => <Time value={t.createdAt} /> },
           {
             label: "Manage",
@@ -58,9 +66,17 @@ export function ConversationsPage(
                 <Action action="rename-conversation" id={t.id} value={t.title}>
                   Rename
                 </Action>
-                <Action action="delete-conversation" id={t.id} danger>
-                  Delete
-                </Action>
+                {t.archived
+                  ? (
+                    <Action action="purge-conversation" id={t.id} danger>
+                      Delete permanently
+                    </Action>
+                  )
+                  : (
+                    <Action action="archive-conversation" id={t.id}>
+                      Archive
+                    </Action>
+                  )}
               </div>
             ),
           },

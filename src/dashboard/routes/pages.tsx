@@ -32,6 +32,7 @@ const query = (url: URL): Query => ({
   kind: url.searchParams.get("kind") ?? undefined,
   categoryId: url.searchParams.get("categoryId") ?? undefined,
   agentId: url.searchParams.get("agentId") ?? undefined,
+  status: url.searchParams.get("status") ?? undefined,
 });
 function html(_c: Context, node: Child, status = 200) {
   return new Response("<!doctype html>" + String(node), {

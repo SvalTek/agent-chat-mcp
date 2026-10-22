@@ -30,6 +30,7 @@ const query = (url: string): Query => {
     kind: p.get("kind") ?? undefined,
     agentId: p.get("agentId") ?? undefined,
     categoryId: p.get("categoryId") ?? undefined,
+    status: p.get("status") ?? undefined,
   };
 };
 export function adminApi(admin: AdminServices) {
@@ -82,23 +83,38 @@ export function adminApi(admin: AdminServices) {
   api.patch("/integrations/:id", ownerOnly, async (c) => {
     const input = z.object({
       accessLevel: z.enum(["admin", "user"]).optional(),
+      revoke: z.boolean().optional(),
       rotate: z.boolean().optional(),
     }).parse(await c.req.json());
     const result = await admin.integrations.update(c.req.param("id"), input);
     await admin.audit.write(
-      "integration.updated",
+      input.revoke ? "integration.revoked" : "integration.updated",
       result.record.id,
       c.get("owner").username,
     );
     return c.json(result);
   });
   api.delete("/integrations/:id", ownerOnly, async (c) => {
-    const result = await admin.integrations.update(c.req.param("id"), {
-      revoke: true,
-    });
+    const record = required(
+      (await admin.store.kv.get<{
+        accountId: string;
+        expiresAt: string;
+        id: string;
+        revokedAt: string | null;
+      }>(["integration", c.req.param("id")])).value,
+      "Integration not found.",
+    );
+    if (
+      !record.revokedAt && Date.parse(record.expiresAt) > Date.now()
+    ) throw new AdminError("Revoke the integration before deleting it.", 409);
+    const account = await admin.store.getAccount(record.accountId);
+    if (account && !account.suspendedAt) {
+      await admin.agents.suspend(record.accountId, true);
+    }
+    const result = await admin.agents.remove(record.accountId);
     await admin.audit.write(
-      "integration.revoked",
-      result.record.id,
+      "integration.purged",
+      record.id,
       c.get("owner").username,
     );
     return c.json(result);
@@ -136,7 +152,13 @@ export function adminApi(admin: AdminServices) {
     );
     return c.json({ changed: true, csrf: session.csrf });
   });
-  api.get("/overview", async (c) => c.json(await admin.observe.overview()));
+  api.get("/overview", async (c) => {
+    const [overview, activity] = await Promise.all([
+      admin.observe.overview(),
+      admin.audit.list({ limit: 6 }),
+    ]);
+    return c.json({ ...overview, activity: activity.items });
+  });
   api.get(
     "/activity",
     async (c) => c.json(await admin.audit.list(query(c.req.url))),
@@ -170,7 +192,29 @@ export function adminApi(admin: AdminServices) {
   api.delete("/conversations/:id", async (c) => {
     const result = await admin.conversations.remove(c.req.param("id"));
     await admin.audit.write(
-      "conversation.deleted",
+      "conversation.purged",
+      c.req.param("id"),
+      c.get("owner").username,
+    );
+    return c.json(result);
+  });
+  api.patch("/conversations/:id/archive", async (c) => {
+    const input = z.object({ archived: z.boolean() }).parse(await c.req.json());
+    const result = await admin.conversations.archive(
+      c.req.param("id"),
+      input.archived,
+    );
+    await admin.audit.write(
+      input.archived ? "conversation.archived" : "conversation.reopened",
+      result.id,
+      c.get("owner").username,
+    );
+    return c.json(result);
+  });
+  api.delete("/messages/:id/purge", async (c) => {
+    const result = await admin.conversations.purgeMessage(c.req.param("id"));
+    await admin.audit.write(
+      "message.purged",
       c.req.param("id"),
       c.get("owner").username,
     );
@@ -198,7 +242,7 @@ export function adminApi(admin: AdminServices) {
   api.delete("/messages/:id", async (c) => {
     const result = await admin.conversations.deleteMessage(c.req.param("id"));
     await admin.audit.write(
-      "message.deleted",
+      "message.redacted",
       c.req.param("id"),
       c.get("owner").username,
     );
@@ -236,7 +280,7 @@ export function adminApi(admin: AdminServices) {
   api.delete("/categories/:id", async (c) => {
     const result = await admin.categories.remove(c.req.param("id"));
     await admin.audit.write(
-      "category.deleted",
+      "category.purged",
       c.req.param("id"),
       c.get("owner").username,
     );
@@ -258,6 +302,21 @@ export function adminApi(admin: AdminServices) {
         (await admin.agents.detail(c.req.param("id"), query(c.req.url))).inbox,
       ),
   );
+  api.patch("/agents/:id/profile", async (c) => {
+    const input = z.object({ description: z.string().trim().max(500) }).parse(
+      await c.req.json(),
+    );
+    const result = await admin.agents.updateProfile(
+      c.req.param("id"),
+      input.description,
+    );
+    await admin.audit.write(
+      "agent.profile_updated",
+      result.id,
+      c.get("owner").username,
+    );
+    return c.json(result);
+  });
   api.patch("/agents/:id", async (c) => {
     const input = z.object({ suspended: z.boolean() }).parse(
       await c.req.json(),
@@ -269,6 +328,15 @@ export function adminApi(admin: AdminServices) {
     await admin.audit.write(
       input.suspended ? "agent.suspended" : "agent.reactivated",
       result.id,
+      c.get("owner").username,
+    );
+    return c.json(result);
+  });
+  api.delete("/agents/:id", async (c) => {
+    const result = await admin.agents.remove(c.req.param("id"));
+    await admin.audit.write(
+      "agent.purged",
+      c.req.param("id"),
       c.get("owner").username,
     );
     return c.json(result);
@@ -334,17 +402,19 @@ export function adminApi(admin: AdminServices) {
     );
     return c.json(result, 201);
   });
-  api.delete("/access/:id", ownerOnly, async (c) => {
+  api.patch("/access/:id", ownerOnly, async (c) => {
     const entry = await admin.store.kv.get<AccessTokenRecord>([
       "access-token",
       c.req.param("id"),
     ]);
     const record = required(entry.value);
+    if (record.revokedAt) {
+      throw new AdminError("Token is already revoked.", 409);
+    }
+    const updated = { ...record, revokedAt: new Date().toISOString() };
     if (
-      !(await admin.store.kv.atomic().check(entry).set(entry.key, {
-        ...record,
-        revokedAt: new Date().toISOString(),
-      }).commit()).ok
+      !(await admin.store.kv.atomic().check(entry).set(entry.key, updated)
+        .commit()).ok
     ) throw new AdminError("Token changed. Retry.", 409);
     for (const session of [...admin.auth.sessions.values()]) {
       if (session.gatewayId === record.id) {
@@ -353,10 +423,39 @@ export function adminApi(admin: AdminServices) {
     }
     await admin.audit.write(
       "token.revoked",
+      updated.id,
+      c.get("owner").username,
+    );
+    return c.json(updated);
+  });
+  api.delete("/access/:id", ownerOnly, async (c) => {
+    const entry = await admin.store.kv.get<AccessTokenRecord>([
+      "access-token",
+      c.req.param("id"),
+    ]);
+    const record = required(entry.value);
+    if (
+      record.kind !== "api" &&
+      !record.revokedAt &&
+      (!record.expiresAt || Date.parse(record.expiresAt) > Date.now())
+    ) {
+      throw new AdminError(
+        "Revoke or let the token expire before deleting it.",
+        409,
+      );
+    }
+    if (
+      !(await admin.store.kv.atomic().check(entry).delete(entry.key).commit())
+        .ok
+    ) {
+      throw new AdminError("Token changed. Retry.", 409);
+    }
+    await admin.audit.write(
+      "token.purged",
       record.id,
       c.get("owner").username,
     );
-    return c.json({ revoked: true });
+    return c.json({ deleted: true });
   });
   api.get(
     "/logs",

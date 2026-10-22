@@ -39,7 +39,7 @@ export class Categories {
   ) {
     const accountId = requireAccount(session);
     const entry = await this.kv.get<Category>(["category", categoryId]);
-    if (!entry.value || entry.value.deletedAt) {
+    if (!entry.value || entry.value.deletedAt || entry.value.purgingAt) {
       throw new Error("Category not found.");
     }
     if (entry.value.creatorAccountId !== accountId) {
@@ -75,7 +75,7 @@ export class Categories {
   async archiveCategory(session: SessionIdentity, categoryId: string) {
     const accountId = requireAccount(session);
     const entry = await this.kv.get<Category>(["category", categoryId]);
-    if (!entry.value || entry.value.deletedAt) {
+    if (!entry.value || entry.value.deletedAt || entry.value.purgingAt) {
       throw new Error("Category not found.");
     }
     if (entry.value.creatorAccountId !== accountId) {
@@ -101,7 +101,9 @@ export class Categories {
   async getCategory(categoryId: string) {
     const category =
       (await this.kv.get<Category>(["category", categoryId])).value;
-    return category && !category.deletedAt ? category : null;
+    return category && !category.deletedAt && !category.purgingAt
+      ? category
+      : null;
   }
 
   async listCategories(options: { cursor?: string; limit?: number } = {}) {
